@@ -82,24 +82,31 @@ canvas { display: block; }
 
 #crosshair-label.visible { display: block; }
 
-/* ── Semantic search (bottom-left) ──────────────────────────────────── */
+/* ── Semantic search (bottom-left, chat-like box) ──────────────────── */
 #search-panel {
   bottom: 16px;
   left: 16px;
-  width: 280px;
+  width: 380px;
 }
 
 #search-input {
   width: 100%;
+  min-height: 96px;
+  max-height: 240px;
   background: transparent;
   border: 1px solid var(--border);
   color: var(--fg);
   caret-color: var(--accent);
-  padding: 7px 10px;
+  padding: 10px 12px;
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1.5;
   outline: none;
   letter-spacing: 0.02em;
+  resize: none;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 #search-input::placeholder { color: var(--muted); }
@@ -192,7 +199,7 @@ canvas { display: block; }
 #hud {
   position: fixed;
   bottom: 16px;
-  left: 312px;
+  left: 412px;
   font-size: 10px;
   color: var(--muted);
   letter-spacing: 0.1em;

@@ -20,10 +20,15 @@ import * as THREE from 'three';
 
 const API_BASE = '';
 const PHASE = {
-  GIMBAL_MS:    600,
+  GIMBAL_MS:     600,
   ILLUMINATE_MS: 1000,
-  TRAVEL_MS:    1500,
+  TRAVEL_MS:     1500,
+  EXPAND_MS:     500,   // point-size expansion after arrival
 };
+
+const PT_SIZE_DEFAULT = 1.7; // base point size outside a cluster
+const PT_SIZE_ARRIVED = 2.1; // point size once arrived inside a cluster
+const AUTO_ROTATE_RAD_PER_SEC = 0.15; // slow yaw after arrival
 
 const COLORS = {
   fg:      0x000000,
@@ -118,9 +123,9 @@ let baseMaxDist = 1;
 let cloudCenter = new THREE.Vector3();
 
 // Slider state
-let worldScale  = 24;
-let densityMult = 4.0;
-let ptsMult     = 0.4;
+let worldScale  = 40;                // bigger local "box" — more room between clusters
+let densityMult = 0.3;               // tighter clusters by default
+let ptsMult     = PT_SIZE_DEFAULT;   // bigger points by default
 let spdMult     = 1.5;
 let fogMult     = 1.0;
 let baseMoveSpd = 1;
@@ -133,11 +138,13 @@ const keys = {};
 let moveSpeed = 1.0;
 
 // Animation state
-let flyAnim   = null; // local-world camera fly
-let gimbalAnim = null; // local-world gimbal rotation
-let illumAnim = null; // illuminate phase animation
-let illuminatedSet = new Set(); // indices to keep lit during travel
-let usingDemoData = false;      // true when /visualization/layout is unreachable
+let flyAnim    = null;  // local-world camera fly
+let gimbalAnim = null;  // local-world gimbal rotation
+let illumAnim  = null;  // per-point illuminate pulse
+let expandAnim = null;  // point-size expansion after arrival
+let autoRotateActive = false; // slow yaw after arrival, killed by any user input
+let illuminatedSet = new Set();
+let usingDemoData = false;
 
 // Crosshair-based picking
 const raycaster = new THREE.Raycaster();
@@ -264,10 +271,11 @@ function buildLocalScene(data) {
 
   applyWorldScale(worldScale);
 
+  // Start further from the cloud so the initial view has real breathing room.
   camera.position.set(
     cx * worldScale,
     cy * worldScale,
-    cz * worldScale + baseMaxDist * worldScale * 1.3,
+    cz * worldScale + baseMaxDist * worldScale * 2.0,
   );
 
   buildGlobalScene();
@@ -295,7 +303,8 @@ const globalScene = new THREE.Scene();
 globalScene.background = new THREE.Color(COLORS.bg);
 
 const globalCamera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
-globalCamera.position.set(2.4, 2.4, 2.4);
+// More side-on viewing angle (slight elevation instead of corner-isometric)
+globalCamera.position.set(0, 0.3, 3.0);
 globalCamera.lookAt(0, 0, 0);
 
 const globalRenderer = new THREE.WebGLRenderer({ canvas: globalCanvas, antialias: true, alpha: true });
@@ -345,13 +354,24 @@ function localToGlobal(pos) {
 
 function updateGlobalScene() {
   if (!globalCube || !pointCloud) return;
-  // Constant slow rotation for "spatial feel"
+  // Constant slow yaw for "spatial feel"; tiny tilt only — viewed from side.
   globalGroup.rotation.y += 0.0025;
-  globalGroup.rotation.x = 0.35;
+  globalGroup.rotation.x = 0.08;
 
   // Position current marker based on camera position in local world
   const localPos = localToGlobal(camera.position);
   globalCurrentMarker.position.copy(localPos);
+
+  // Dynamically shrink travel line — its "from" vertex follows current marker,
+  // so the line shortens as we approach destination, then clears on arrival.
+  if (globalTravelLine && globalDestMarker) {
+    const positions = globalTravelLine.geometry.attributes.position;
+    positions.setXYZ(0, localPos.x, localPos.y, localPos.z);
+    positions.needsUpdate = true;
+    if (localPos.distanceTo(globalDestMarker.position) < 0.04) {
+      removeGlobalDestination();
+    }
+  }
 }
 
 function setGlobalDestination(localTarget) {
@@ -400,6 +420,70 @@ function easeOutCubic(t) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Destination cloud — dark radial haze around target cluster.
+// Appears right after gimbal; fades in briefly, then fades out based on the
+// camera's distance to the target as the user approaches.
+// ─────────────────────────────────────────────────────────────────────────────
+
+let destCloud = null;
+let cloudTex  = null;
+
+function ensureCloudTexture() {
+  if (cloudTex) return cloudTex;
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  g.addColorStop(0.00, 'rgba(0,0,0,0.55)');
+  g.addColorStop(0.35, 'rgba(0,0,0,0.20)');
+  g.addColorStop(1.00, 'rgba(0,0,0,0.00)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  cloudTex = new THREE.CanvasTexture(canvas);
+  return cloudTex;
+}
+
+function spawnDestCloud(centroid, radius) {
+  removeDestCloud();
+  const mat = new THREE.SpriteMaterial({
+    map: ensureCloudTexture(),
+    opacity: 0,
+    transparent: true,
+    depthWrite: false,
+    // Disable scene fog on the cloud — white fog would fade the dark haze to
+    // invisibility exactly when we need it to be visible (distant destination).
+    fog: false,
+  });
+  destCloud = new THREE.Sprite(mat);
+  destCloud.userData.radius    = radius;
+  destCloud.userData.spawnTime = performance.now();
+  destCloud.scale.set(radius * 5, radius * 5, 1);
+  destCloud.position.copy(centroid);
+  scene.add(destCloud);
+}
+
+function removeDestCloud() {
+  if (!destCloud) return;
+  scene.remove(destCloud);
+  destCloud.material.dispose();
+  destCloud = null;
+}
+
+function updateDestCloud() {
+  if (!destCloud) return;
+  const r    = destCloud.userData.radius;
+  const age  = performance.now() - destCloud.userData.spawnTime;
+  const dist = camera.position.distanceTo(destCloud.position);
+  // Fade in over 300ms
+  const fadeIn = Math.min(age / 300, 1);
+  // Fade out by distance: visible at >3r, gone inside r.
+  const distFade = Math.max(0, Math.min(1, (dist - r) / (r * 2)));
+  destCloud.material.opacity = 0.72 * fadeIn * distFade;
+  if (destCloud.material.opacity < 0.01 && fadeIn >= 1) removeDestCloud();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Pointer lock + movement
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -414,6 +498,7 @@ document.addEventListener('pointerlockchange', () => {
 
 document.addEventListener('mousemove', (e) => {
   if (pointerLocked) {
+    if (e.movementX || e.movementY) autoRotateActive = false;
     camera.rotation.y -= e.movementX * 0.0022;
     camera.rotation.x -= e.movementY * 0.0022;
     camera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, camera.rotation.x));
@@ -438,6 +523,7 @@ function updateMovement() {
   const active = keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD'] ||
                  keys['Space'] || keys['ShiftLeft'] || keys['ShiftRight'] ||
                  keys['ArrowUp'] || keys['ArrowDown'] || keys['ArrowLeft'] || keys['ArrowRight'];
+  if (active) autoRotateActive = false;
   if (!active) return;
 
   const sy = Math.sin(camera.rotation.y);
@@ -517,7 +603,7 @@ async function doSearch() {
     return;
   }
 
-  // Centroid of matches
+  // Centroid + radius of matches
   let cx = 0, cy = 0, cz = 0;
   for (const i of matchIndices) {
     cx += posFlat[i*3]; cy += posFlat[i*3+1]; cz += posFlat[i*3+2];
@@ -525,22 +611,59 @@ async function doSearch() {
   cx /= matchIndices.length; cy /= matchIndices.length; cz /= matchIndices.length;
   const target = new THREE.Vector3(cx, cy, cz);
 
+  let radius = 0;
+  for (const i of matchIndices) {
+    const dx = posFlat[i*3]   - cx;
+    const dy = posFlat[i*3+1] - cy;
+    const dz = posFlat[i*3+2] - cz;
+    const d  = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (d > radius) radius = d;
+  }
+  radius = Math.max(radius, baseMaxDist * worldScale * 0.04);
+
   searchStatus.textContent = `${matchIndices.length} results · navigating`;
   searchInput.blur();
+
+  // Any previous arrival-state is cancelled
+  autoRotateActive = false;
+  setPointSize(PT_SIZE_DEFAULT);
 
   // ── Phase 1: Gimbal — rotate camera toward target without moving
   await runGimbal(target);
 
-  // ── Phase 2: Illuminate — light up matched points (~1s)
+  // ── Destination cloud appears right after gimbal, signalling "there"
+  spawnDestCloud(target, radius);
+
+  // ── Phase 2: Illuminate — per-point pulse (~1s). Cloud is visible alongside.
   await runIlluminate(matchIndices);
 
-  // ── Phase 3: Travel — move camera to target (parallel local + global)
-  await runTravel(target);
+  // ── Phase 3: Travel — camera approaches; cloud fades with distance.
+  //             Offset = small fraction of cluster radius so we land INSIDE
+  //             the cluster (not parked outside it).
+  await runTravel(target, radius * 0.3);
 
-  // After arrival: clear destination marker + line in global world, dim illumination
+  // ── Arrival cleanup
   removeGlobalDestination();
+  removeDestCloud();
   clearIllumination();
+
+  // ── Phase 4: Expand point size 1.7 → 2.1 over ~0.5s (inside cluster)
+  await runExpand(PT_SIZE_ARRIVED);
+
+  // ── Phase 5: Auto-rotation from FPV, so the user can see nearby points.
+  //            Killed by any movement, mouse-look, or new search.
+  autoRotateActive = true;
+
   searchStatus.textContent = `arrived · ${matchIndices.length} results`;
+}
+
+function setPointSize(v) {
+  ptsMult = v;
+  const sld = document.getElementById('sld-pts');
+  const val = document.getElementById('val-pts');
+  if (sld) sld.value = String(v);
+  if (val) val.textContent = v.toFixed(1);
+  if (pointCloud) updateStarUniforms();
 }
 
 function runGimbal(target) {
@@ -608,11 +731,11 @@ function updateIlluminate(now) {
   }
 }
 
-function runTravel(target) {
+function runTravel(target, offset) {
   return new Promise(resolve => {
-    // Approach to a comfortable viewing distance from the centroid
-    const md = baseMaxDist * worldScale;
-    const offset = md * 0.06;
+    // `offset` is the distance we stop at from the centroid, on the camera side.
+    // Pass cluster radius * small factor to actually LAND INSIDE the cluster
+    // rather than parking at a generic cloud-relative distance.
     const dir = new THREE.Vector3().subVectors(camera.position, target).normalize();
     const finalPos = new THREE.Vector3().copy(target).add(dir.multiplyScalar(offset));
 
@@ -639,8 +762,42 @@ function updateFly(now) {
   }
 }
 
+function runExpand(targetPts) {
+  return new Promise(resolve => {
+    expandAnim = {
+      start:   performance.now(),
+      dur:     PHASE.EXPAND_MS,
+      fromPts: ptsMult,
+      toPts:   targetPts,
+      onDone:  resolve,
+    };
+  });
+}
+
+function updateExpand(now) {
+  if (!expandAnim) return;
+  const t = Math.min((now - expandAnim.start) / expandAnim.dur, 1);
+  const e = easeOutCubic(t);
+  const v = expandAnim.fromPts + (expandAnim.toPts - expandAnim.fromPts) * e;
+  setPointSize(v);
+  if (t >= 1) {
+    const done = expandAnim.onDone;
+    expandAnim = null;
+    done && done();
+  }
+}
+
+function updateAutoRotate(dt) {
+  if (!autoRotateActive) return;
+  camera.rotation.y -= AUTO_ROTATE_RAD_PER_SEC * dt;
+}
+
 searchInput.addEventListener('keydown', (e) => {
-  if (e.code === 'Enter') doSearch();
+  // Enter submits; Shift+Enter inserts a newline (chat-like behavior).
+  if (e.code === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    doSearch();
+  }
   e.stopPropagation();
 });
 searchInput.addEventListener('focus', () => {
@@ -683,9 +840,12 @@ function animate(now) {
   lastTime = now;
 
   if (pointerLocked) updateMovement();
+  updateAutoRotate(dt);
   updateGimbal(now);
   updateIlluminate(now);
   updateFly(now);
+  updateExpand(now);
+  updateDestCloud();
   updateCrosshair();
   updateGlobalScene();
 
