@@ -8,8 +8,9 @@ Music producers explore their sample libraries through 3D vector space visualiza
 api/            # Python FastAPI service (uvicorn) — REST endpoints, serves frontend static files
 ui/             # Vanilla Three.js frontend — interactive 3D visualization, Web Audio playback
 pipeline/       # Audio processing — embedding (CLAP), metadata extraction, UMAP computation
+producerpal/    # Ableton Live AI assistant — OSC bridge + Gemma 4 agent
 shared/         # Shared Python utilities (DB models, config, types)
-docker/         # Docker Compose config (pgvector, etc.)
+docker/         # Docker Compose config (pgvector, Ollama/Gemma 4)
 data/           # Local sample data directory (not committed)
 ```
 
@@ -42,6 +43,13 @@ Flat monorepo. Single Python project with `uv` for dependency management.
 - Steps: load audio → extract metadata (spec TBD) → compute CLAP embedding → store in pgvector
 - UMAP coordinates are pre-computed after embedding, with an API endpoint to trigger recomputation when new samples are added
 
+### ProducerPal
+- AI assistant that knows Ableton Live's functionality and can control it
+- **Ableton bridge**: AbletonOSC Max for Live device — OSC protocol (send port 11000, receive port 11001)
+- **LLM**: Gemma 4 running locally via Ollama (Docker Compose service, port 11434)
+- **Transport**: WebSocket between API and frontend for real-time interaction
+- **Scope**: Can query and control Live's session view, tracks, clips, devices, and transport
+
 ## Deployment
 
 - **Backend host**: NVIDIA DGX Spark (Ubuntu) — runs API, pipeline, pgvector (Docker Compose)
@@ -73,8 +81,7 @@ Minimal tests for critical paths only (pipeline processing, search endpoints). N
 Up to 100,000 samples per library.
 
 ## Future work (not yet specified)
-- Ableton Live integration via ProducerPal using local LLM (Gemma 4)
-- WebSocket support for real-time features
+- WebSocket support for ProducerPal real-time chat interface
 - Detailed metadata extraction specification (BPM, key, spectral features, etc.)
 - Advanced 3D navigation modes
 
