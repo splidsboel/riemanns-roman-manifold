@@ -10,6 +10,8 @@ Usage:
     sections = analyze_chords("path/to/song.mp3")
 """
 
+import contextlib
+import io
 import re
 import tempfile
 from collections import Counter
@@ -25,8 +27,6 @@ from music21 import stream
 from music21 import tempo as m21tempo
 
 from pipeline.separate_stems import separate_stems
-from shared.db import engine, get_session
-from shared.models import Base, ChordSection, Sample
 
 # Cached basic-pitch model (loaded on first call to _extract_notes)
 _BP_MODEL = None
@@ -78,7 +78,8 @@ def _extract_notes(audio_path: Path) -> list:
     from basic_pitch.inference import predict
 
     model = _get_bp_model()
-    _, _, note_events = predict(str(audio_path), model)
+    with contextlib.redirect_stdout(io.StringIO()):
+        _, _, note_events = predict(str(audio_path), model)
     return note_events
 
 
@@ -307,38 +308,9 @@ def _detect_sections(
     return result
 
 
-def _store_results(audio_path: Path, duration_sec: float, sections: list[dict]) -> None:
-    """Upsert sample row and replace its chord sections."""
-    with get_session() as session:
-        sample = session.query(Sample).filter_by(file_path=str(audio_path)).first()
-        if sample is None:
-            sample = Sample(file_path=str(audio_path), duration_sec=duration_sec)
-            session.add(sample)
-            session.flush()
-        else:
-            sample.duration_sec = duration_sec
-            session.query(ChordSection).filter_by(sample_id=sample.id).delete()
-
-        for idx, sec in enumerate(sections):
-            session.add(
-                ChordSection(
-                    sample_id=sample.id,
-                    section_index=idx,
-                    start_sec=sec["start_sec"],
-                    end_sec=sec["end_sec"],
-                    key=sec["key"],
-                    progression=sec["progression"],
-                    chords=sec["chords"],
-                )
-            )
-
-        session.commit()
-
-
 def analyze_chords(audio_path: Path | str) -> list[dict]:
     """
-    Full pipeline: separate stems → mix harmonic stems → extract notes →
-    detect chord sections → store in DB.
+    Separate stems → mix harmonic stems → extract notes → detect chord sections.
 
     Args:
         audio_path: Path to an audio file (WAV or MP3).
@@ -348,8 +320,6 @@ def analyze_chords(audio_path: Path | str) -> list[dict]:
         start_sec, end_sec, key, progression, chords.
     """
     audio_path = Path(audio_path)
-
-    Base.metadata.create_all(engine)
 
     print(f"[analyze_chords] Separating stems: {audio_path.name}")
     harmonic_mix = _get_harmonic_mix(audio_path)
@@ -368,8 +338,5 @@ def analyze_chords(audio_path: Path | str) -> list[dict]:
 
     sections = _detect_sections(chord_groups, key, duration_sec)
     print(f"[analyze_chords] Found {len(sections)} section(s).")
-
-    _store_results(audio_path, duration_sec, sections)
-    print("[analyze_chords] Stored results to DB.")
 
     return sections

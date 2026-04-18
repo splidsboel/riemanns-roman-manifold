@@ -5,6 +5,5 @@ DATABASE_URL = os.environ.get(
     "postgresql+psycopg://postgres:postgres@localhost:5432/manifold",
 )
 
-# CLAP produces 512-dim embeddings. Kept as a single source of truth so seed
-# data and real embeddings stay in sync when the real encoder lands.
-EMBEDDING_DIM = 512
+# CLAP 2023 model produces 1024-dim embeddings.
+EMBEDDING_DIM = 1024

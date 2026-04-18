@@ -18,4 +18,5 @@ dependencies = [
     "basic-pitch",
     "music21",
     "soundfile",
+    "msclap",
 ]
