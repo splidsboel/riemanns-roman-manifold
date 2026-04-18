@@ -1,7 +1,8 @@
 import httpx
 
 OLLAMA_URL = "http://localhost:11434"
-MODEL = "gemma3:27b"
+MODEL = "gemma4:26b"
+MODEL_TEST = "gemma3:1b"
 
 
 async def chat(messages: list[dict]) -> str:

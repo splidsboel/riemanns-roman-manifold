@@ -67,8 +67,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Install Python dependencies
 uv sync
 
-# Start pgvector
-docker compose -f docker/docker-compose.yml up -d
+# Start containers (pgvector + Ollama) — brug altid scriptet, ikke Docker Desktop
+bash docker/start.sh
 
 # Run the API (serves frontend too)
 uv run uvicorn api.main:app --reload
