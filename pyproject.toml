@@ -12,4 +12,7 @@ dependencies = [
     "numpy",
     "httpx",
     "python-osc",
+    "torch",
+    "demucs",
+    "torchcodec",
 ]

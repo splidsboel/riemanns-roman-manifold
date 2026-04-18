@@ -40,8 +40,16 @@ Flat monorepo. Single Python project with `uv` for dependency management.
 - Triggered via API endpoint (not CLI)
 - Processes audio files from a configured directory on the host machine
 - Supported formats: WAV, MP3
-- Steps: load audio → extract metadata (spec TBD) → compute CLAP embedding → store in pgvector
-- UMAP coordinates are pre-computed after embedding, with an API endpoint to trigger recomputation when new samples are added
+- Long files (full songs) are pre-processed before embedding — split into stems, then segments
+
+#### Implemented steps
+- **Stem separation** (`pipeline/separate_stems.py`): splits a track into bass, drums, vocals, other using [demucs](https://github.com/facebookresearch/demucs) (htdemucs model). Output cached under `demix/`. Returns list of WAV paths.
+
+#### Planned steps (not yet implemented)
+- **Structural segmentation**: split stems/tracks into verse, chorus, bridge, etc. — boundaries snapped to nearest downbeat
+- **Metadata extraction**: BPM, key, roman numeral analysis (spec TBD)
+- **CLAP embedding**: compute audio embeddings → store in pgvector
+- **UMAP recomputation**: triggered via API endpoint when new samples are added
 
 ### ProducerPal
 - AI assistant that knows Ableton Live's functionality and can control it
@@ -63,6 +71,9 @@ Flat monorepo. Single Python project with `uv` for dependency management.
 ```bash
 # Install uv (if not installed)
 curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install system dependencies (required for audio processing)
+brew install ffmpeg   # macOS
 
 # Install Python dependencies
 uv sync
