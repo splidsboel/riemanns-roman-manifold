@@ -12,4 +12,9 @@ dependencies = [
     "numpy",
     "httpx",
     "python-osc",
+    "laion-clap",
+    "msclap",
+    "torch",
+    "torchaudio",
+    "transformers",
 ]

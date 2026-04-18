@@ -43,6 +43,11 @@ Flat monorepo. Single Python project with `uv` for dependency management.
 - Steps: load audio → extract metadata (spec TBD) → compute CLAP embedding → store in pgvector
 - UMAP coordinates are pre-computed after embedding, with an API endpoint to trigger recomputation when new samples are added
 
+**Embedding models:**
+- **Primær (besluttet)**: `laion/clap-htsat-fused` — HTSAT audio encoder + RoBERTa + feature fusion (håndterer variabel lydlængde)
+- **Under test**: `microsoft/msclap` (2023) — større træningssæt, sammenlignes mod LAION via `pipeline/compare_embeddings.py`
+- Query expansion via Gemma 4 (26b MoE) inden tekst-embedding — giver rigere søgebeskrivelser
+
 ### ProducerPal
 - AI assistant that knows Ableton Live's functionality and can control it
 - **Ableton bridge**: AbletonOSC Max for Live device — OSC protocol (send port 11000, receive port 11001)
