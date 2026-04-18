@@ -1,21 +1,777 @@
+// riemanns-roman-manifold — semantic search 3D explorer
+// Local world: full-viewport FPS scene of CLAP/UMAP points
+// Global world: bottom-right cube minimap with current location + destination
+// Search flow: gimbal (0.6s) → illuminate (1.0s) → travel (1.5s)
+//   travel runs in parallel in local + global worlds (same duration)
+//
+// FUTURE: this UI is one of three planned panes (ProducerPal, Ableton,
+// Semantic Search). It would be cool if the three windows could be linked
+// in a fixed layout (split-pane / tiled) so resizing or repositioning one
+// updates the others automatically — no per-window manual adjustment.
+// Today the entire UI lives at the document root; when we move to the
+// three-pane shell, the search pane should be wrappable in a single
+// container (#search-root) with no fixed positioning of its own.
+
 import * as THREE from 'three';
 
-const canvas = document.getElementById('canvas');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
+// ─────────────────────────────────────────────────────────────────────────────
+// Config
+// ─────────────────────────────────────────────────────────────────────────────
+
+const API_BASE = '';
+const PHASE = {
+  GIMBAL_MS:    600,
+  ILLUMINATE_MS: 1000,
+  TRAVEL_MS:    1500,
+};
+
+const COLORS = {
+  fg:      0x000000,
+  bg:      0xffffff,
+  accent:  0xd40000,
+  muted:   0x888888,
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DOM refs
+// ─────────────────────────────────────────────────────────────────────────────
+
+const overlay         = document.getElementById('overlay');
+const overlayMsg      = document.getElementById('overlay-msg');
+const searchInput     = document.getElementById('search-input');
+const searchStatus    = document.getElementById('search-status');
+const crosshairLabel  = document.getElementById('crosshair-label');
+const settingsToggle  = document.getElementById('settings-toggle');
+const settingsPanel   = document.getElementById('settings-panel');
+const localCanvas     = document.getElementById('canvas-local');
+const globalCanvas    = document.getElementById('canvas-global');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local world (Three.js, full viewport)
+// ─────────────────────────────────────────────────────────────────────────────
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
-camera.position.z = 5;
+scene.background = new THREE.Color(COLORS.bg);
+scene.fog = new THREE.FogExp2(COLORS.bg, 0.01);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 5000);
+camera.rotation.order = 'YXZ';
+
+const renderer = new THREE.WebGLRenderer({ canvas: localCanvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
 
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(innerWidth, innerHeight);
+  updateStarUniforms();
 });
 
-function animate() {
-  requestAnimationFrame(animate);
-  renderer.render(scene, camera);
+// ─────────────────────────────────────────────────────────────────────────────
+// Point cloud — round black points on white, with shader-controlled illumination
+// ─────────────────────────────────────────────────────────────────────────────
+
+const STAR_VERT = `
+attribute float aIllum;
+uniform float uSize;
+uniform float uScale;
+varying float vIllum;
+void main() {
+  vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mvPos;
+  float dist = -mvPos.z;
+  // Illuminated points get a size pulse (up to ~1.6x)
+  float sizeMul = 1.0 + aIllum * 0.6;
+  gl_PointSize = uSize * sizeMul * (uScale / max(dist, 0.001));
+  vIllum = aIllum;
+}`;
+
+const STAR_FRAG = `
+varying float vIllum;
+void main() {
+  vec2 uv = gl_PointCoord - 0.5;
+  float r = length(uv);
+  if (r > 0.5) discard;
+  // Round black point with anti-aliased edge.
+  // Illuminated points: the disc grows AND a thin ring radiates outward,
+  // giving a "lights up in black" pulse without leaving the B/W palette.
+  float core = 1.0 - smoothstep(0.40, 0.50, r);
+  float ring = 0.0;
+  if (vIllum > 0.0) {
+    float ringR = mix(0.42, 0.49, vIllum);
+    ring = (1.0 - smoothstep(0.005, 0.025, abs(r - ringR))) * vIllum;
+  }
+  float alpha = max(core, ring);
+  if (alpha < 0.01) discard;
+  gl_FragColor = vec4(0.0, 0.0, 0.0, alpha);
+}`;
+
+let points = [];                   // [{path, filename, x, y, z, cluster}]
+let rawPos = null;                 // Float32Array (n*3)
+let clusterCentroidsFlat = null;
+let posFlat = null;
+let illumAttr = null;              // per-point illumination (0..1)
+let pathIndex = new Map();
+let pointCloud = null;
+let baseMaxDist = 1;
+let cloudCenter = new THREE.Vector3();
+
+// Slider state
+let worldScale  = 24;
+let densityMult = 4.0;
+let ptsMult     = 0.4;
+let spdMult     = 1.5;
+let fogMult     = 1.0;
+let baseMoveSpd = 1;
+let basePtSize  = 0.1;
+let baseFogDens = 0.01;
+
+// Controls
+let pointerLocked = false;
+const keys = {};
+let moveSpeed = 1.0;
+
+// Animation state
+let flyAnim   = null; // local-world camera fly
+let gimbalAnim = null; // local-world gimbal rotation
+let illumAnim = null; // illuminate phase animation
+let illuminatedSet = new Set(); // indices to keep lit during travel
+let usingDemoData = false;      // true when /visualization/layout is unreachable
+
+// Crosshair-based picking
+const raycaster = new THREE.Raycaster();
+const screenCenter = new THREE.Vector2(0, 0);
+let crosshairIdx = -1;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scale/position helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function recomputePositions() {
+  if (!rawPos || !clusterCentroidsFlat) return;
+  const n = rawPos.length / 3;
+  for (let i = 0; i < n; i++) {
+    const cx = clusterCentroidsFlat[i*3];
+    const cy = clusterCentroidsFlat[i*3+1];
+    const cz = clusterCentroidsFlat[i*3+2];
+    posFlat[i*3]   = (cx + (rawPos[i*3]   - cx) * densityMult) * worldScale;
+    posFlat[i*3+1] = (cy + (rawPos[i*3+1] - cy) * densityMult) * worldScale;
+    posFlat[i*3+2] = (cz + (rawPos[i*3+2] - cz) * densityMult) * worldScale;
+  }
+  if (pointCloud) {
+    pointCloud.geometry.attributes.position.array.set(posFlat);
+    pointCloud.geometry.attributes.position.needsUpdate = true;
+    pointCloud.geometry.computeBoundingSphere();
+    pointCloud.geometry.computeBoundingBox();
+  }
 }
-animate();
+
+function applyWorldScale(newScale) {
+  const prev = worldScale;
+  worldScale = newScale;
+  recomputePositions();
+  if (pointCloud && prev > 0 && prev !== worldScale) {
+    camera.position.multiplyScalar(worldScale / prev);
+  }
+  const md = baseMaxDist * worldScale;
+  baseMoveSpd = md * 0.002;
+  moveSpeed   = baseMoveSpd * spdMult;
+  basePtSize  = md * 0.012;
+  if (pointCloud) updateStarUniforms();
+  baseFogDens = 1.2 / md;
+  scene.fog.density = baseFogDens * fogMult;
+  raycaster.params.Points = { threshold: md * 0.015 };
+  camera.near = Math.max(0.01, md * 0.0005);
+  camera.far  = md * 12;
+  camera.updateProjectionMatrix();
+}
+
+function updateStarUniforms() {
+  if (!pointCloud) return;
+  const u = pointCloud.material.uniforms;
+  u.uSize.value  = basePtSize * ptsMult;
+  u.uScale.value = 0.5 * renderer.domElement.height * camera.projectionMatrix.elements[5];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Build local scene
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildLocalScene(data) {
+  points = data.points;
+  const n = points.length;
+  rawPos  = new Float32Array(n * 3);
+  posFlat = new Float32Array(n * 3);
+  illumAttr = new Float32Array(n);
+  pathIndex.clear();
+
+  let cx = 0, cy = 0, cz = 0;
+  const clusterSums = new Map();
+  for (let i = 0; i < n; i++) {
+    const p = points[i];
+    rawPos[i*3] = p.x; rawPos[i*3+1] = p.y; rawPos[i*3+2] = p.z;
+    cx += p.x; cy += p.y; cz += p.z;
+    pathIndex.set(p.path, i);
+    if (p.cluster >= 0) {
+      if (!clusterSums.has(p.cluster)) clusterSums.set(p.cluster, {x:0,y:0,z:0,count:0});
+      const s = clusterSums.get(p.cluster);
+      s.x += p.x; s.y += p.y; s.z += p.z; s.count++;
+    }
+  }
+  cx /= n; cy /= n; cz /= n;
+  cloudCenter.set(cx, cy, cz);
+
+  const clusterCentroids = new Map();
+  for (const [id, s] of clusterSums) {
+    clusterCentroids.set(id, { x: s.x/s.count, y: s.y/s.count, z: s.z/s.count });
+  }
+
+  clusterCentroidsFlat = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const cl = points[i].cluster;
+    const cent = cl >= 0 ? clusterCentroids.get(cl)
+                         : { x: rawPos[i*3], y: rawPos[i*3+1], z: rawPos[i*3+2] };
+    clusterCentroidsFlat[i*3]   = cent.x;
+    clusterCentroidsFlat[i*3+1] = cent.y;
+    clusterCentroidsFlat[i*3+2] = cent.z;
+  }
+
+  baseMaxDist = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = rawPos[i*3]-cx, dy = rawPos[i*3+1]-cy, dz = rawPos[i*3+2]-cz;
+    const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (d > baseMaxDist) baseMaxDist = d;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+  geo.setAttribute('aIllum',   new THREE.BufferAttribute(illumAttr, 1));
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uSize:  { value: basePtSize * ptsMult },
+      uScale: { value: 1.0 },
+    },
+    vertexShader:   STAR_VERT,
+    fragmentShader: STAR_FRAG,
+    transparent:    true,
+    depthWrite:     false,
+  });
+
+  pointCloud = new THREE.Points(geo, mat);
+  scene.add(pointCloud);
+
+  applyWorldScale(worldScale);
+
+  camera.position.set(
+    cx * worldScale,
+    cy * worldScale,
+    cz * worldScale + baseMaxDist * worldScale * 1.3,
+  );
+
+  buildGlobalScene();
+  overlay.classList.add('hidden');
+}
+
+function setIllumination(indices, value) {
+  if (!illumAttr) return;
+  for (const i of indices) illumAttr[i] = value;
+  pointCloud.geometry.attributes.aIllum.needsUpdate = true;
+}
+
+function clearIllumination() {
+  if (!illumAttr) return;
+  illumAttr.fill(0);
+  pointCloud.geometry.attributes.aIllum.needsUpdate = true;
+  illuminatedSet.clear();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Global world (mini cube minimap)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const globalScene = new THREE.Scene();
+globalScene.background = new THREE.Color(COLORS.bg);
+
+const globalCamera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
+globalCamera.position.set(2.4, 2.4, 2.4);
+globalCamera.lookAt(0, 0, 0);
+
+const globalRenderer = new THREE.WebGLRenderer({ canvas: globalCanvas, antialias: true, alpha: true });
+globalRenderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+globalRenderer.setSize(220, 220);
+
+const globalGroup = new THREE.Group();
+globalScene.add(globalGroup);
+
+let globalCube = null;
+let globalCurrentMarker = null;  // red sphere — current location
+let globalDestMarker    = null;  // red sphere — destination
+let globalTravelLine    = null;  // black line from current to destination
+
+function buildGlobalScene() {
+  // 1×1×1 wireframe cube, edges only — angular box
+  const cubeGeo = new THREE.BoxGeometry(1, 1, 1);
+  const edges = new THREE.EdgesGeometry(cubeGeo);
+  globalCube = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: COLORS.fg }));
+  globalGroup.add(globalCube);
+
+  // Current location marker (red sphere)
+  const sphereGeo = new THREE.SphereGeometry(0.04, 16, 16);
+  const redMat    = new THREE.MeshBasicMaterial({ color: COLORS.accent });
+  globalCurrentMarker = new THREE.Mesh(sphereGeo, redMat);
+  globalGroup.add(globalCurrentMarker);
+}
+
+// Map a local-world position into the global cube ([-0.5..0.5]^3)
+function localToGlobal(pos) {
+  const md = baseMaxDist * worldScale;
+  if (md <= 0) return new THREE.Vector3();
+  const cx = cloudCenter.x * worldScale;
+  const cy = cloudCenter.y * worldScale;
+  const cz = cloudCenter.z * worldScale;
+  const v = new THREE.Vector3(
+    (pos.x - cx) / (2 * md),
+    (pos.y - cy) / (2 * md),
+    (pos.z - cz) / (2 * md),
+  );
+  // Clamp to cube
+  v.x = Math.max(-0.5, Math.min(0.5, v.x));
+  v.y = Math.max(-0.5, Math.min(0.5, v.y));
+  v.z = Math.max(-0.5, Math.min(0.5, v.z));
+  return v;
+}
+
+function updateGlobalScene() {
+  if (!globalCube || !pointCloud) return;
+  // Constant slow rotation for "spatial feel"
+  globalGroup.rotation.y += 0.0025;
+  globalGroup.rotation.x = 0.35;
+
+  // Position current marker based on camera position in local world
+  const localPos = localToGlobal(camera.position);
+  globalCurrentMarker.position.copy(localPos);
+}
+
+function setGlobalDestination(localTarget) {
+  // Add destination marker + line from current → destination
+  removeGlobalDestination();
+  const dest = localToGlobal(localTarget);
+  const start = localToGlobal(camera.position);
+
+  const sphereGeo = new THREE.SphereGeometry(0.04, 16, 16);
+  const redMat    = new THREE.MeshBasicMaterial({ color: COLORS.accent });
+  globalDestMarker = new THREE.Mesh(sphereGeo, redMat);
+  globalDestMarker.position.copy(dest);
+  globalGroup.add(globalDestMarker);
+
+  const lineGeo = new THREE.BufferGeometry().setFromPoints([start, dest]);
+  const lineMat = new THREE.LineBasicMaterial({ color: COLORS.fg });
+  globalTravelLine = new THREE.Line(lineGeo, lineMat);
+  globalGroup.add(globalTravelLine);
+}
+
+function removeGlobalDestination() {
+  if (globalDestMarker) {
+    globalGroup.remove(globalDestMarker);
+    globalDestMarker.geometry.dispose();
+    globalDestMarker.material.dispose();
+    globalDestMarker = null;
+  }
+  if (globalTravelLine) {
+    globalGroup.remove(globalTravelLine);
+    globalTravelLine.geometry.dispose();
+    globalTravelLine.material.dispose();
+    globalTravelLine = null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Easing
+// ─────────────────────────────────────────────────────────────────────────────
+
+function easeInOut(t) {
+  return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+}
+
+function easeOutCubic(t) {
+  return 1 - Math.pow(1 - t, 3);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pointer lock + movement
+// ─────────────────────────────────────────────────────────────────────────────
+
+renderer.domElement.addEventListener('click', () => {
+  if (pointerLocked) return;
+  renderer.domElement.requestPointerLock();
+});
+
+document.addEventListener('pointerlockchange', () => {
+  pointerLocked = document.pointerLockElement === renderer.domElement;
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (pointerLocked) {
+    camera.rotation.y -= e.movementX * 0.0022;
+    camera.rotation.x -= e.movementY * 0.0022;
+    camera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, camera.rotation.x));
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  // Don't capture keys while typing in the search input
+  if (document.activeElement === searchInput) return;
+  keys[e.code] = true;
+  if (e.code === 'Escape' && pointerLocked) document.exitPointerLock();
+  if (pointerLocked && (e.code === 'Space' || e.code.startsWith('Arrow'))) e.preventDefault();
+});
+
+document.addEventListener('keyup', (e) => { delete keys[e.code]; });
+
+renderer.domElement.addEventListener('wheel', (e) => {
+  moveSpeed = Math.max(0.005, Math.min(60, moveSpeed * (e.deltaY > 0 ? 1.25 : 0.8)));
+}, { passive: true });
+
+function updateMovement() {
+  const active = keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD'] ||
+                 keys['Space'] || keys['ShiftLeft'] || keys['ShiftRight'] ||
+                 keys['ArrowUp'] || keys['ArrowDown'] || keys['ArrowLeft'] || keys['ArrowRight'];
+  if (!active) return;
+
+  const sy = Math.sin(camera.rotation.y);
+  const cy = Math.cos(camera.rotation.y);
+  let dx = 0, dy = 0, dz = 0;
+
+  if (keys['KeyW'] || keys['ArrowUp'])    { dx -= sy; dz -= cy; }
+  if (keys['KeyS'] || keys['ArrowDown'])  { dx += sy; dz += cy; }
+  if (keys['KeyA'] || keys['ArrowLeft'])  { dx -= cy; dz += sy; }
+  if (keys['KeyD'] || keys['ArrowRight']) { dx += cy; dz -= sy; }
+  if (keys['Space'])                       dy += 1;
+  if (keys['ShiftLeft'] || keys['ShiftRight']) dy -= 1;
+
+  const len = Math.sqrt(dx*dx + dy*dy + dz*dz) || 1;
+  camera.position.x += (dx/len) * moveSpeed;
+  camera.position.y += (dy/len) * moveSpeed;
+  camera.position.z += (dz/len) * moveSpeed;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Crosshair picking — what's at screen center
+// ─────────────────────────────────────────────────────────────────────────────
+
+function updateCrosshair() {
+  if (!pointCloud) { crosshairIdx = -1; return; }
+  raycaster.setFromCamera(screenCenter, camera);
+  const hits = raycaster.intersectObject(pointCloud);
+  if (hits.length > 0) {
+    crosshairIdx = hits[0].index;
+    crosshairLabel.textContent = points[crosshairIdx].filename;
+    crosshairLabel.classList.add('visible');
+  } else {
+    crosshairIdx = -1;
+    crosshairLabel.classList.remove('visible');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Search flow: gimbal → illuminate → travel
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function doSearch() {
+  const q = searchInput.value.trim();
+  if (!q || !posFlat) return;
+
+  searchStatus.textContent = 'searching…';
+
+  let resultPaths = [];
+  if (usingDemoData) {
+    // No backend — pick a random cluster from the demo cloud as "results"
+    // so the animation flow (gimbal → illuminate → travel) can be exercised.
+    resultPaths = pickDemoMatches(q, 20);
+  } else {
+    try {
+      const resp = await fetch(API_BASE + '/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q, k: 20 }),
+      });
+      if (!resp.ok) throw new Error(resp.status);
+      const data = await resp.json();
+      resultPaths = (data.results || []).map(r => r.path);
+    } catch (e) {
+      searchStatus.textContent = 'search failed';
+      return;
+    }
+  }
+
+  // Resolve to indices in current layout
+  const matchIndices = [];
+  for (const p of resultPaths) {
+    const i = pathIndex.get(p);
+    if (i !== undefined) matchIndices.push(i);
+  }
+  if (matchIndices.length === 0) {
+    searchStatus.textContent = 'no matches in layout';
+    return;
+  }
+
+  // Centroid of matches
+  let cx = 0, cy = 0, cz = 0;
+  for (const i of matchIndices) {
+    cx += posFlat[i*3]; cy += posFlat[i*3+1]; cz += posFlat[i*3+2];
+  }
+  cx /= matchIndices.length; cy /= matchIndices.length; cz /= matchIndices.length;
+  const target = new THREE.Vector3(cx, cy, cz);
+
+  searchStatus.textContent = `${matchIndices.length} results · navigating`;
+  searchInput.blur();
+
+  // ── Phase 1: Gimbal — rotate camera toward target without moving
+  await runGimbal(target);
+
+  // ── Phase 2: Illuminate — light up matched points (~1s)
+  await runIlluminate(matchIndices);
+
+  // ── Phase 3: Travel — move camera to target (parallel local + global)
+  await runTravel(target);
+
+  // After arrival: clear destination marker + line in global world, dim illumination
+  removeGlobalDestination();
+  clearIllumination();
+  searchStatus.textContent = `arrived · ${matchIndices.length} results`;
+}
+
+function runGimbal(target) {
+  return new Promise(resolve => {
+    // Compute target rotation by aiming a temporary camera at the target
+    const tmp = new THREE.Object3D();
+    tmp.rotation.order = 'YXZ';
+    tmp.position.copy(camera.position);
+    tmp.lookAt(target);
+
+    // Wrap target yaw to nearest equivalent angle to avoid long-way rotations
+    let targetYaw   = tmp.rotation.y;
+    const startYaw  = camera.rotation.y;
+    while (targetYaw - startYaw >  Math.PI) targetYaw -= Math.PI * 2;
+    while (targetYaw - startYaw < -Math.PI) targetYaw += Math.PI * 2;
+    const startPitch  = camera.rotation.x;
+    const targetPitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, tmp.rotation.x));
+
+    gimbalAnim = {
+      start: performance.now(),
+      dur:   PHASE.GIMBAL_MS,
+      startYaw, startPitch,
+      targetYaw, targetPitch,
+      onDone: resolve,
+    };
+  });
+}
+
+function updateGimbal(now) {
+  if (!gimbalAnim) return;
+  const t = Math.min((now - gimbalAnim.start) / gimbalAnim.dur, 1);
+  const e = easeInOut(t);
+  camera.rotation.y = gimbalAnim.startYaw   + (gimbalAnim.targetYaw   - gimbalAnim.startYaw)   * e;
+  camera.rotation.x = gimbalAnim.startPitch + (gimbalAnim.targetPitch - gimbalAnim.startPitch) * e;
+  if (t >= 1) {
+    const done = gimbalAnim.onDone;
+    gimbalAnim = null;
+    done && done();
+  }
+}
+
+function runIlluminate(matchIndices) {
+  return new Promise(resolve => {
+    illuminatedSet = new Set(matchIndices);
+    illumAnim = {
+      start: performance.now(),
+      dur:   PHASE.ILLUMINATE_MS,
+      indices: matchIndices,
+      onDone: resolve,
+    };
+  });
+}
+
+function updateIlluminate(now) {
+  if (!illumAnim) return;
+  const t = Math.min((now - illumAnim.start) / illumAnim.dur, 1);
+  // Pulse: ramp up then hold near max
+  const v = t < 0.6 ? easeOutCubic(t / 0.6) : 1.0;
+  for (const i of illumAnim.indices) illumAttr[i] = v;
+  pointCloud.geometry.attributes.aIllum.needsUpdate = true;
+  if (t >= 1) {
+    const done = illumAnim.onDone;
+    illumAnim = null;
+    done && done();
+  }
+}
+
+function runTravel(target) {
+  return new Promise(resolve => {
+    // Approach to a comfortable viewing distance from the centroid
+    const md = baseMaxDist * worldScale;
+    const offset = md * 0.06;
+    const dir = new THREE.Vector3().subVectors(camera.position, target).normalize();
+    const finalPos = new THREE.Vector3().copy(target).add(dir.multiplyScalar(offset));
+
+    setGlobalDestination(target);
+
+    flyAnim = {
+      from:  camera.position.clone(),
+      to:    finalPos,
+      start: performance.now(),
+      dur:   PHASE.TRAVEL_MS,
+      onDone: resolve,
+    };
+  });
+}
+
+function updateFly(now) {
+  if (!flyAnim) return;
+  const t = Math.min((now - flyAnim.start) / flyAnim.dur, 1);
+  camera.position.lerpVectors(flyAnim.from, flyAnim.to, easeInOut(t));
+  if (t >= 1) {
+    const done = flyAnim.onDone;
+    flyAnim = null;
+    done && done();
+  }
+}
+
+searchInput.addEventListener('keydown', (e) => {
+  if (e.code === 'Enter') doSearch();
+  e.stopPropagation();
+});
+searchInput.addEventListener('focus', () => {
+  if (pointerLocked) document.exitPointerLock();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Settings panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+settingsToggle.addEventListener('click', () => {
+  settingsPanel.classList.toggle('hidden');
+});
+
+function initSlider(id, valId, onChange) {
+  const el = document.getElementById(id);
+  const valEl = document.getElementById(valId);
+  el.addEventListener('input', () => {
+    const v = parseFloat(el.value);
+    valEl.textContent = v.toFixed(1);
+    onChange(v);
+  });
+}
+
+initSlider('sld-scale',   'val-scale',   v => applyWorldScale(v));
+initSlider('sld-density', 'val-density', v => { densityMult = v; recomputePositions(); });
+initSlider('sld-pts',     'val-pts',     v => { ptsMult = v; if (pointCloud) updateStarUniforms(); });
+initSlider('sld-spd',     'val-spd',     v => { spdMult = v; moveSpeed = baseMoveSpd * spdMult; });
+initSlider('sld-fog',     'val-fog',     v => { fogMult = v; scene.fog.density = baseFogDens * fogMult; });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Animation loop
+// ─────────────────────────────────────────────────────────────────────────────
+
+let lastTime = performance.now();
+
+function animate(now) {
+  requestAnimationFrame(animate);
+  const dt = Math.min((now - lastTime) / 1000, 0.1);
+  lastTime = now;
+
+  if (pointerLocked) updateMovement();
+  updateGimbal(now);
+  updateIlluminate(now);
+  updateFly(now);
+  updateCrosshair();
+  updateGlobalScene();
+
+  renderer.render(scene, camera);
+  globalRenderer.render(globalScene, globalCamera);
+}
+requestAnimationFrame(animate);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bootstrap — poll until layout is ready, then build scene
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function pollAndLoad() {
+  while (true) {
+    try {
+      const s = await fetch(API_BASE + '/visualization/status').then(r => r.json());
+      if (s.ready) {
+        overlayMsg.textContent = 'building scene…';
+        const data = await fetch(API_BASE + '/visualization/layout').then(r => r.json());
+        if (data.points && data.points.length > 0) {
+          buildLocalScene(data);
+          return;
+        }
+      } else if (s.index_count === 0) {
+        overlayMsg.textContent = 'index is empty — process samples first';
+        return;
+      } else if (s.computing) {
+        overlayMsg.textContent = 'computing 3D layout…';
+      } else {
+        overlayMsg.textContent = 'preparing layout…';
+      }
+    } catch {
+      // Backend not ready — fall back to demo data so the UI is usable standalone
+      overlayMsg.textContent = 'backend unreachable — loading demo cloud';
+      usingDemoData = true;
+      buildLocalScene(generateDemoData());
+      return;
+    }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+}
+
+// Demo "search" — picks a cluster pseudo-deterministically from the query
+// string so the same query keeps flying to the same place. Deterministic
+// hashing → stable cluster choice; jitter inside the cluster picks the
+// k highlighted points.
+function pickDemoMatches(query, k) {
+  if (!points.length) return [];
+  // Hash the query to choose a cluster
+  let h = 0;
+  for (let i = 0; i < query.length; i++) h = (h * 31 + query.charCodeAt(i)) | 0;
+  const clusters = new Map();
+  for (let i = 0; i < points.length; i++) {
+    const c = points[i].cluster;
+    if (!clusters.has(c)) clusters.set(c, []);
+    clusters.get(c).push(i);
+  }
+  const clusterIds = [...clusters.keys()];
+  const chosen = clusterIds[Math.abs(h) % clusterIds.length];
+  const pool = clusters.get(chosen);
+  // Take k random points from that cluster
+  const shuffled = pool.slice().sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, Math.min(k, pool.length)).map(i => points[i].path);
+}
+
+// Demo cloud so the UI works standalone before the API is wired up
+function generateDemoData() {
+  const pts = [];
+  const N_CLUSTERS = 6;
+  const PER_CLUSTER = 250;
+  for (let c = 0; c < N_CLUSTERS; c++) {
+    const cx = (Math.random() - 0.5) * 6;
+    const cy = (Math.random() - 0.5) * 6;
+    const cz = (Math.random() - 0.5) * 6;
+    for (let i = 0; i < PER_CLUSTER; i++) {
+      pts.push({
+        path: `demo/c${c}_${i}.wav`,
+        filename: `c${c}_${i}.wav`,
+        x: cx + (Math.random() - 0.5) * 1.2,
+        y: cy + (Math.random() - 0.5) * 1.2,
+        z: cz + (Math.random() - 0.5) * 1.2,
+        cluster: c,
+      });
+    }
+  }
+  return { points: pts, clusters: N_CLUSTERS };
+}
+
+pollAndLoad();

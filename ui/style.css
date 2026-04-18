@@ -1,0 +1,235 @@
+/* ── Base ───────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --fg: #000;
+  --bg: #fff;
+  --border: #000;
+  --muted: #888;
+  --accent: #d40000;
+  --panel-bg: rgba(255, 255, 255, 0.94);
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', 'Courier New', monospace;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  overflow: hidden;
+  letter-spacing: 0.02em;
+}
+
+canvas { display: block; }
+
+#canvas-local {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+}
+
+/* ── Generic panel (angular boxes, 1px borders) ─────────────────────── */
+.panel {
+  position: fixed;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  padding: 12px 14px;
+  z-index: 10;
+  font-size: 11px;
+}
+
+.panel-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  margin-bottom: 8px;
+}
+
+/* ── Crosshair (always visible at center) ───────────────────────────── */
+#crosshair {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.ch-dot {
+  width: 5px;
+  height: 5px;
+  background: var(--fg);
+  border-radius: 50%;
+}
+
+#crosshair-label {
+  margin-top: 6px;
+  padding: 3px 8px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: none;
+}
+
+#crosshair-label.visible { display: block; }
+
+/* ── Semantic search (bottom-left) ──────────────────────────────────── */
+#search-panel {
+  bottom: 16px;
+  left: 16px;
+  width: 280px;
+}
+
+#search-input {
+  width: 100%;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  caret-color: var(--accent);
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  letter-spacing: 0.02em;
+}
+
+#search-input::placeholder { color: var(--muted); }
+#search-input:focus { border-color: var(--accent); }
+
+#search-status {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  margin-top: 6px;
+  min-height: 12px;
+  text-transform: uppercase;
+}
+
+/* ── Global world (bottom-right) ────────────────────────────────────── */
+#global-panel {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  width: 220px;
+  z-index: 10;
+}
+
+#canvas-global {
+  width: 220px;
+  height: 220px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  display: block;
+}
+
+#global-label {
+  margin-top: 8px;
+  text-align: center;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+}
+
+/* ── Settings (top-right) ───────────────────────────────────────────── */
+#settings-toggle {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  cursor: pointer;
+  z-index: 11;
+}
+
+#settings-toggle:hover { background: var(--fg); color: var(--bg); }
+
+#settings-panel {
+  top: 54px;
+  right: 16px;
+  width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#settings-panel.hidden { display: none; }
+
+.srow { display: flex; flex-direction: column; gap: 4px; }
+
+.srow label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  display: flex;
+  justify-content: space-between;
+  text-transform: uppercase;
+}
+
+.srow label span { color: var(--accent); }
+
+.srow input[type=range] {
+  width: 100%;
+  accent-color: var(--fg);
+  cursor: pointer;
+  height: 2px;
+  background: var(--fg);
+}
+
+/* ── HUD (cheat sheet) ──────────────────────────────────────────────── */
+#hud {
+  position: fixed;
+  bottom: 16px;
+  left: 312px;
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+  z-index: 10;
+  pointer-events: none;
+}
+
+/* ── Loading overlay ────────────────────────────────────────────────── */
+#overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  gap: 12px;
+  transition: opacity 0.4s;
+}
+
+#overlay.hidden { opacity: 0; pointer-events: none; }
+
+.loader {
+  font-size: 11px;
+  letter-spacing: 0.3em;
+  font-weight: 700;
+  animation: blink 1s steps(2) infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0.3; }
+}
+
+#overlay-msg {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
