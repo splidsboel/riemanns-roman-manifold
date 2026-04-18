@@ -108,13 +108,25 @@ def _build_chord_groups(note_events: list) -> list[tuple[float, list[int]]]:
     return groups
 
 
+# Pitch class → note name, using conventional major/minor key spellings
+_PC_NAME_MAJOR = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
+_PC_NAME_MINOR = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"]
+
+
 def _detect_key(note_events: list, chord_groups: list) -> m21key.Key:
     """
-    Estimate the global key from note events using music21.
+    Estimate key by combining Krumhansl-Schmuckler with chord root frequency.
 
-    music21 tends to prefer major keys. If the detected key is major but its
-    relative minor's tonic appears more often as a chord root, switch to
-    relative minor.
+    Strategy:
+    - K-S identifies the diatonic scale (pitch class profile).
+    - Chord root frequency identifies the functional tonic within that scale —
+      the pitch class K-S alone can't resolve among relative major/minor keys.
+    - The first identifiable triad gets a 3× bonus (songs typically open near
+      the tonic).
+    - If the K-S tonic is already one of the two most common chord roots, we
+      trust it — overriding only when K-S tonic is clearly absent from the
+      harmonic centre of gravity.
+    - Mode is read from the most common chord quality on the chosen tonic.
     """
     part = stream.Part()
     part.insert(0, m21tempo.MetronomeMark(number=120))
@@ -126,23 +138,51 @@ def _detect_key(note_events: list, chord_groups: list) -> m21key.Key:
 
     detected = part.analyze("key")
 
-    if detected.mode == "major":
-        root_counts: Counter = Counter()
-        for _, pitches in chord_groups:
-            if len(pitches) >= 3:
-                c = m21chord.Chord(pitches)
-                if c.quality != "other":
-                    try:
-                        root_counts[c.root().pitchClass] += 1
-                    except Exception:
-                        pass
+    # Count chord roots (clear triads only)
+    root_counts: Counter = Counter()
+    quality_votes: dict[int, Counter] = {}
 
-        major_pc = detected.tonic.pitchClass
-        rel_minor_pc = (major_pc + 9) % 12  # relative minor tonic
-        if root_counts.get(rel_minor_pc, 0) > root_counts.get(major_pc, 0):
-            detected = detected.relative
+    for _, pitches in chord_groups:
+        if len(pitches) >= 3:
+            c = m21chord.Chord(pitches)
+            if c.quality in ("major", "minor", "diminished", "augmented"):
+                try:
+                    pc = c.root().pitchClass
+                    root_counts[pc] += 1
+                    quality_votes.setdefault(pc, Counter())[c.quality] += 1
+                except Exception:
+                    pass
 
-    return detected
+    if not root_counts:
+        return detected
+
+    # First identifiable triad gets a 3× first-chord bonus
+    for _, pitches in chord_groups:
+        if len(pitches) >= 3:
+            c = m21chord.Chord(pitches)
+            if c.quality in ("major", "minor", "diminished", "augmented"):
+                try:
+                    root_counts[c.root().pitchClass] += 3
+                except Exception:
+                    pass
+                break
+
+    top_roots = [pc for pc, _ in root_counts.most_common()]
+    ks_tonic_pc = detected.tonic.pitchClass
+
+    # Trust K-S when its tonic is among the two most common chord roots;
+    # override only when it is clearly peripheral.
+    tonic_pc = ks_tonic_pc if ks_tonic_pc in top_roots[:2] else top_roots[0]
+
+    top_quality = quality_votes.get(tonic_pc, Counter()).most_common(1)
+    raw_mode = top_quality[0][0] if top_quality else "major"
+    mode = "minor" if raw_mode in ("minor", "diminished") else "major"
+
+    try:
+        name_table = _PC_NAME_MINOR if mode == "minor" else _PC_NAME_MAJOR
+        return m21key.Key(name_table[tonic_pc], mode)
+    except Exception:
+        return detected
 
 
 def _chord_label(c: m21chord.Chord) -> str:
@@ -220,14 +260,20 @@ def _detect_sections(
     N = 8
     chunks = [deduped[i : i + N] for i in range(0, len(deduped), N)]
 
-    # Merge adjacent chunks whose roman numeral sets overlap ≥ 50%
+    # Merge adjacent chunks whose roman numeral sets overlap ≥ 50%,
+    # but never let a section grow beyond MAX_SECTION_SEC. This prevents
+    # harmonically static songs (e.g. two-chord vamps) from collapsing into
+    # a single section.
+    MAX_SECTION_SEC = 45.0
     merged = [chunks[0]]
     for chunk in chunks[1:]:
         prev_rns = frozenset(rn for _, rn, _ in merged[-1])
         curr_rns = frozenset(rn for _, rn, _ in chunk)
         union = prev_rns | curr_rns
         overlap = len(prev_rns & curr_rns) / len(union) if union else 0
-        if overlap >= 0.5:
+        sec_start = merged[-1][0][0]
+        sec_end = chunk[-1][0]
+        if overlap >= 0.5 and (sec_end - sec_start) < MAX_SECTION_SEC:
             merged[-1] = merged[-1] + chunk
         else:
             merged.append(chunk)
