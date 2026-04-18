@@ -57,6 +57,27 @@ Flat monorepo. Single Python project with `uv` for dependency management.
 - **Cross-platform**: Must work on both Ubuntu and macOS
 - **Frontend**: Served by the API, accessed via browser on any machine
 
+## Docker containers
+
+Startes altid via CLI-script (ikke Docker Desktop — understøtter ikke GPU):
+```bash
+bash docker/start.sh
+```
+
+| Container | Image | Port | Formål |
+|---|---|---|---|
+| `docker-pgvector-1` | `pgvector/pgvector:pg16` | `5432` | PostgreSQL + pgvector extension |
+| `docker-ollama-1` | `ollama/ollama:latest` | `11434` | Ollama LLM runtime |
+
+**Ollama-modeller hentet:**
+- `gemma4:26b` (17 GB, MoE) — produktionsmodel til ProducerPal
+- `gemma3:1b` (777 MB) — testmodel
+
+**pgvector:**
+- Database: `manifold`, user: `postgres`, password: `postgres`
+- `vector`-extension er aktiveret og klar til brug
+- Bekræftet: forbindelse OK, CREATE TABLE/DROP TABLE virker
+
 ## Development
 
 ### Setup
@@ -67,7 +88,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Install Python dependencies
 uv sync
 
-# Start containers (pgvector + Ollama) — brug altid scriptet, ikke Docker Desktop
+# Start containers (pgvector + Ollama)
 bash docker/start.sh
 
 # Run the API (serves frontend too)
