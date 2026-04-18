@@ -1,0 +1,15 @@
+[project]
+name = "riemanns-roman-manifold"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pgvector",
+    "psycopg[binary]",
+    "sqlalchemy",
+    "umap-learn",
+    "numpy",
+    "httpx",
+    "python-osc",
+]
