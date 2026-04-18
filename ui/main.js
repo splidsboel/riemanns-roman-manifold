@@ -26,8 +26,8 @@ const PHASE = {
   EXPAND_MS:     500,   // point-size expansion after arrival
 };
 
-const PT_SIZE_DEFAULT = 1.7; // base point size outside a cluster
-const PT_SIZE_ARRIVED = 2.1; // point size once arrived inside a cluster
+const PT_SIZE_DEFAULT = 0.3; // base point size outside a cluster
+const PT_SIZE_ARRIVED = 0.5; // point size once arrived inside a cluster
 const AUTO_ROTATE_RAD_PER_SEC = 0.15; // slow yaw after arrival
 
 const COLORS = {
@@ -46,6 +46,7 @@ const overlayMsg      = document.getElementById('overlay-msg');
 const searchInput     = document.getElementById('search-input');
 const searchStatus    = document.getElementById('search-status');
 const crosshairLabel  = document.getElementById('crosshair-label');
+const hoverLabel      = document.getElementById('hover-label');
 const settingsToggle  = document.getElementById('settings-toggle');
 const settingsPanel   = document.getElementById('settings-panel');
 const localCanvas     = document.getElementById('canvas-local');
@@ -57,7 +58,7 @@ const globalCanvas    = document.getElementById('canvas-global');
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(COLORS.bg);
-scene.fog = new THREE.FogExp2(COLORS.bg, 0.01);
+scene.fog = null;
 
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 5000);
 camera.rotation.order = 'YXZ';
@@ -123,14 +124,12 @@ let baseMaxDist = 1;
 let cloudCenter = new THREE.Vector3();
 
 // Slider state
-let worldScale  = 40;                // bigger local "box" — more room between clusters
-let densityMult = 0.3;               // tighter clusters by default
-let ptsMult     = PT_SIZE_DEFAULT;   // bigger points by default
-let spdMult     = 1.5;
-let fogMult     = 1.0;
+let worldScale  = 40;
+let densityMult = 0.3;
+let ptsMult     = PT_SIZE_DEFAULT;
+let spdMult     = 7.0;
 let baseMoveSpd = 1;
 let basePtSize  = 0.1;
-let baseFogDens = 0.01;
 
 // Controls
 let pointerLocked = false;
@@ -186,8 +185,6 @@ function applyWorldScale(newScale) {
   moveSpeed   = baseMoveSpd * spdMult;
   basePtSize  = md * 0.012;
   if (pointCloud) updateStarUniforms();
-  baseFogDens = 1.2 / md;
-  scene.fog.density = baseFogDens * fogMult;
   raycaster.params.Points = { threshold: md * 0.015 };
   camera.near = Math.max(0.01, md * 0.0005);
   camera.far  = md * 12;
@@ -553,11 +550,16 @@ function updateCrosshair() {
   const hits = raycaster.intersectObject(pointCloud);
   if (hits.length > 0) {
     crosshairIdx = hits[0].index;
-    crosshairLabel.textContent = points[crosshairIdx].filename;
+    const name = points[crosshairIdx].filename;
+    crosshairLabel.textContent = name;
     crosshairLabel.classList.add('visible');
+    hoverLabel.textContent = name;
+    hoverLabel.classList.add('visible');
   } else {
     crosshairIdx = -1;
     crosshairLabel.classList.remove('visible');
+    hoverLabel.textContent = '';
+    hoverLabel.classList.remove('visible');
   }
 }
 
@@ -822,11 +824,9 @@ function initSlider(id, valId, onChange) {
   });
 }
 
-initSlider('sld-scale',   'val-scale',   v => applyWorldScale(v));
 initSlider('sld-density', 'val-density', v => { densityMult = v; recomputePositions(); });
 initSlider('sld-pts',     'val-pts',     v => { ptsMult = v; if (pointCloud) updateStarUniforms(); });
 initSlider('sld-spd',     'val-spd',     v => { spdMult = v; moveSpeed = baseMoveSpd * spdMult; });
-initSlider('sld-fog',     'val-fog',     v => { fogMult = v; scene.fog.density = baseFogDens * fogMult; });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Animation loop

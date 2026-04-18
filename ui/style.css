@@ -112,11 +112,22 @@ canvas { display: block; }
 #search-input::placeholder { color: var(--muted); }
 #search-input:focus { border-color: var(--accent); }
 
+#hover-label {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--fg);
+  margin-top: 6px;
+  min-height: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 #search-status {
   font-size: 10px;
   letter-spacing: 0.1em;
   color: var(--muted);
-  margin-top: 6px;
+  margin-top: 4px;
   min-height: 12px;
   text-transform: uppercase;
 }
