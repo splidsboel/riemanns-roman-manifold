@@ -103,6 +103,28 @@ Same five sliders as the original, restyled to the new palette:
 All values mutate the same state variables and trigger the same
 recompute paths as the inspiration repo.
 
+## ui-fixes branch — spatial + targeting tweaks
+
+- **Bigger perceived world**: `worldScale` default 24 → 40 and camera-start
+  offset 1.3 × → 2.0 × so clusters occupy more of the visible cube without
+  distorting the global minimap.
+- **Cluster-targeted travel**: `runTravel` now takes an `offset` arg;
+  `doSearch` passes `radius * 0.3` of the matched cluster so the camera
+  actually lands *inside* the cluster instead of parking outside it.
+- **Dynamic global travel line**: the line's "from" vertex is updated
+  every frame in `updateGlobalScene` from the current marker's position,
+  so the line visibly shrinks as the user approaches the destination
+  and is auto-removed at <0.04 cube-units distance.
+- **Destination cloud after gimbal**: black radial-gradient sprite
+  (`fog: false`) shows where the search is aimed; removed on arrival.
+- **Post-arrival expand**: point size lerps 1.7 → 2.1 over 500 ms once
+  inside the cluster, then slow FPV auto-rotation kicks in (killed by
+  any movement, mouse-look, or new search).
+- **Chat-like search**: `<input>` → `<textarea rows="4">` with
+  Enter=submit, Shift+Enter=newline.
+- **Global view angle**: position (0, 0.3, 3.0) + tilt 0.08 gives a more
+  side-on view of the cube (was corner-isometric at (2.4, 2.4, 2.4)).
+
 ## Future: three-pane shell
 
 The `main.js` header now carries a comment about the planned three-pane
