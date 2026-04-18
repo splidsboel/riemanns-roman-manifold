@@ -15,4 +15,7 @@ dependencies = [
     "torch",
     "demucs",
     "torchcodec",
+    "basic-pitch",
+    "music21",
+    "soundfile",
 ]
