@@ -148,6 +148,15 @@ The UI calls these endpoints — they don't exist yet on the API side:
 | `GET`  | `/visualization/status` | bootstrap polling |
 | `GET`  | `/visualization/layout` | initial point cloud `{points: [...]}` |
 | `POST` | `/search` | `{query, k}` → `{results: [{path, ...}]}` |
+| `GET`  | `/audio/{id}` | stream a sample's audio file for in-browser playback |
 
 Until those exist, the demo fallback in `generateDemoData()` keeps the
 scene populated for design iteration.
+
+## Audio preview
+
+Aim the crosshair at a point and press **E** (or left-click while pointer
+is locked) to play that sample. A single `<audio>` element is reused, so
+starting a new preview stops the previous one. Audio is fetched from
+`/audio/{id}` on the same origin as the UI, which lets playback work
+through the Cloudflare tunnel without any host/IP plumbing on the client.

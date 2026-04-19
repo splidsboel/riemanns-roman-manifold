@@ -1,8 +1,10 @@
+import mimetypes
 import threading
 import uuid
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -61,6 +63,7 @@ def visualization_layout(db: Session = Depends(get_session)):
     return {
         "points": [
             {
+                "id": r.id,
                 "path": r.path,
                 "filename": r.filename,
                 "x": r.umap_x,
@@ -80,10 +83,37 @@ def search(req: SearchRequest, db: Session = Depends(get_session)):
     rows = search_samples(db, req.query, k=req.k)
     return {
         "results": [
-            {"path": r.path, "filename": r.filename, "cluster": r.cluster}
+            {"id": r.id, "path": r.path, "filename": r.filename, "cluster": r.cluster}
             for r in rows
         ],
     }
+
+
+AUDIO_MIME = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".flac": "audio/flac",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".aif": "audio/x-aiff",
+    ".aiff": "audio/x-aiff",
+}
+
+
+@app.get("/audio/{sample_id}")
+def get_audio(sample_id: int, db: Session = Depends(get_session)):
+    sample = db.query(Sample).filter(Sample.id == sample_id).first()
+    if sample is None:
+        raise HTTPException(404, "sample not found")
+    audio_path = Path(sample.path)
+    if not audio_path.is_file():
+        raise HTTPException(404, f"file missing on host: {sample.path}")
+    media_type = AUDIO_MIME.get(audio_path.suffix.lower()) \
+        or mimetypes.guess_type(str(audio_path))[0] \
+        or "application/octet-stream"
+    return FileResponse(audio_path, media_type=media_type, filename=sample.filename)
 
 
 @app.post("/pipeline/run")
