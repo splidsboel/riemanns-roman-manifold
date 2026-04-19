@@ -26,7 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from pipeline.analyze_chords import analyze_chords
-from pipeline.embed import embed_audio
+from pipeline.embed import embed_audio_batch
 from shared.database import Base, ChordSection, Sample, SessionLocal, engine
 
 
@@ -40,6 +40,7 @@ def _ensure_schema() -> None:
 AUDIO_EXTENSIONS = {'.wav', '.mp3', '.flac', '.aiff', '.aif', '.ogg', '.m4a', '.opus'}
 
 DEFAULT_WORKERS = int(os.environ.get("PIPELINE_WORKERS", "4"))
+DEFAULT_BATCH_SIZE = int(os.environ.get("PIPELINE_BATCH_SIZE", "16"))
 
 
 def discover_audio_files(directory: str) -> list[Path]:
@@ -81,22 +82,25 @@ def _claim_sample(session, audio_path: Path, duration: float | None) -> tuple[Sa
     return existing, False
 
 
-def _process_file(audio_path: Path) -> str:
-    """Process a single audio file. Opens its own DB session — safe to call from
-    worker threads. Returns a short status string for logging.
+def _prep_file(audio_path: Path, skip_stems: bool = False) -> tuple[int | None, Path, str]:
+    """CPU-only prep: claim the sample row and (optionally) run chord analysis.
+
+    Returns ``(sample_id, path, status)``. ``sample_id`` is None when the file
+    is skipped (already embedded). The caller is responsible for embedding in
+    a batched GPU pass.
     """
     session = SessionLocal()
     try:
         duration = _get_duration(audio_path)
         sample, is_new = _claim_sample(session, audio_path, duration)
         if sample is None:
-            return "skipped"
+            return None, audio_path, "skipped"
 
         has_sections = (
             not is_new
             and session.query(ChordSection).filter_by(sample_id=sample.id).first() is not None
         )
-        if duration and duration > 10.0 and not has_sections:
+        if not skip_stems and duration and duration > 10.0 and not has_sections:
             sections = analyze_chords(audio_path)
             for i, sec in enumerate(sections):
                 session.add(ChordSection(
@@ -108,10 +112,29 @@ def _process_file(audio_path: Path) -> str:
                     progression=sec['progression'],
                     chords=sec['chords'],
                 ))
+            session.commit()
 
-        sample.embedding = embed_audio(audio_path).tolist()
+        return sample.id, audio_path, "processed" if is_new else "resumed"
+    finally:
+        session.close()
+
+
+def _embed_batch(items: list[tuple[int, Path]]) -> int:
+    """Embed a batch of (sample_id, path) pairs in a single GPU forward and
+    commit. Returns number of rows successfully updated.
+    """
+    if not items:
+        return 0
+    paths = [p for _, p in items]
+    embeddings = embed_audio_batch(paths)
+    session = SessionLocal()
+    try:
+        for (sid, _), emb in zip(items, embeddings):
+            sample = session.get(Sample, sid)
+            if sample is not None:
+                sample.embedding = emb.tolist()
         session.commit()
-        return "processed" if is_new else "resumed"
+        return len(items)
     finally:
         session.close()
 
@@ -122,31 +145,60 @@ def run_pipeline(
     jobs: dict,
     jobs_lock: threading.Lock | None = None,
     workers: int | None = None,
+    skip_stems: bool = False,
+    batch_size: int | None = None,
 ) -> None:
     _ensure_schema()
     lock = jobs_lock or threading.Lock()
     workers = workers or DEFAULT_WORKERS
+    batch_size = batch_size or DEFAULT_BATCH_SIZE
 
     files = discover_audio_files(directory)
     with lock:
         jobs[job_id].update({'status': 'running', 'total': len(files)})
-    print(f"[pipeline] Found {len(files)} audio files in {directory} (workers={workers})")
+    print(f"[pipeline] Found {len(files)} audio files in {directory} "
+          f"(workers={workers}, batch_size={batch_size})")
+
+    pending: list[tuple[int, Path]] = []
+
+    def flush() -> None:
+        nonlocal pending
+        if not pending:
+            return
+        try:
+            n = _embed_batch(pending)
+            with lock:
+                jobs[job_id]['processed'] += n
+                done, total = jobs[job_id]['processed'], jobs[job_id]['total']
+            print(f"[pipeline] [{done}/{total}] embedded batch of {n}")
+        except Exception as e:
+            print(f"[pipeline] ERROR embed batch ({len(pending)} files): {e}")
+            with lock:
+                for _, p in pending:
+                    jobs[job_id]['errors'].append({'file': str(p), 'error': str(e)})
+        pending = []
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_file = {pool.submit(_process_file, f): f for f in files}
+        future_to_file = {pool.submit(_prep_file, f, skip_stems): f for f in files}
         for fut in as_completed(future_to_file):
             f = future_to_file[fut]
             try:
-                status = fut.result()
+                sid, path, status = fut.result()
             except Exception as e:
                 print(f"[pipeline] ERROR {f.name}: {e}")
                 with lock:
                     jobs[job_id]['errors'].append({'file': str(f), 'error': str(e)})
                 continue
-            with lock:
-                jobs[job_id]['processed'] += 1
-                n, total = jobs[job_id]['processed'], jobs[job_id]['total']
-            print(f"[pipeline] [{n}/{total}] {status}: {f.name}")
+            if sid is None:
+                with lock:
+                    jobs[job_id]['processed'] += 1
+                    n, total = jobs[job_id]['processed'], jobs[job_id]['total']
+                print(f"[pipeline] [{n}/{total}] {status}: {f.name}")
+                continue
+            pending.append((sid, path))
+            if len(pending) >= batch_size:
+                flush()
+        flush()
 
     # Single-flight UMAP — coalesces with any UI-triggered fit and guarantees
     # our freshly-committed embeddings are included.
@@ -164,10 +216,11 @@ def run_pipeline(
 if __name__ == '__main__':
     args = sys.argv[1:]
     reset_db = '--reset-db' in args
+    skip_stems = '--skip-stems' in args
     dirs = [a for a in args if not a.startswith('--')]
 
     if not dirs:
-        print("Usage: python -m pipeline.run [--reset-db] <directory>")
+        print("Usage: python -m pipeline.run [--reset-db] [--skip-stems] <directory>")
         sys.exit(1)
 
     if reset_db:
@@ -176,5 +229,5 @@ if __name__ == '__main__':
         _ensure_schema()
 
     jobs: dict = {'cli': {'status': 'queued', 'processed': 0, 'total': 0, 'errors': []}}
-    run_pipeline(dirs[0], 'cli', jobs)
+    run_pipeline(dirs[0], 'cli', jobs, skip_stems=skip_stems, batch_size=DEFAULT_BATCH_SIZE)
     print(jobs['cli'])

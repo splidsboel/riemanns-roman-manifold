@@ -16,7 +16,17 @@ def _get_model() -> CLAP:
 
 def embed_audio(audio_path: Path) -> np.ndarray:
     """Return a 512-dim CLAP embedding for the given audio file."""
-    emb = _get_model().get_audio_embeddings([str(audio_path)])[0]
-    if isinstance(emb, torch.Tensor):
-        emb = emb.detach().cpu().numpy()
-    return np.asarray(emb)
+    return embed_audio_batch([audio_path])[0]
+
+
+def embed_audio_batch(audio_paths: list[Path]) -> list[np.ndarray]:
+    """Return CLAP embeddings for a list of files in a single GPU forward pass."""
+    if not audio_paths:
+        return []
+    embs = _get_model().get_audio_embeddings([str(p) for p in audio_paths])
+    out: list[np.ndarray] = []
+    for e in embs:
+        if isinstance(e, torch.Tensor):
+            e = e.detach().cpu().numpy()
+        out.append(np.asarray(e))
+    return out

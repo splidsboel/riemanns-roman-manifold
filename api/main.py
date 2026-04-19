@@ -29,6 +29,10 @@ class SearchRequest(BaseModel):
 
 class PipelineRunRequest(BaseModel):
     directory: str
+    skip_stems: bool = False
+    reset_db: bool = False
+    workers: int | None = None
+    batch_size: int | None = None
 
 
 @app.get("/visualization/status")
@@ -84,10 +88,22 @@ def search(req: SearchRequest, db: Session = Depends(get_session)):
 
 @app.post("/pipeline/run")
 def start_pipeline(req: PipelineRunRequest, background_tasks: BackgroundTasks):
+    if req.reset_db:
+        from sqlalchemy import text
+        from shared.database import Base, engine
+        Base.metadata.drop_all(engine)
+        with engine.connect() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            conn.commit()
+        Base.metadata.create_all(engine)
+
     job_id = str(uuid.uuid4())
     with JOBS_LOCK:
         JOBS[job_id] = {'status': 'queued', 'processed': 0, 'total': 0, 'errors': []}
-    background_tasks.add_task(run_pipeline, req.directory, job_id, JOBS, JOBS_LOCK)
+    background_tasks.add_task(
+        run_pipeline, req.directory, job_id, JOBS, JOBS_LOCK,
+        workers=req.workers, skip_stems=req.skip_stems, batch_size=req.batch_size,
+    )
     return {'job_id': job_id}
 
 
