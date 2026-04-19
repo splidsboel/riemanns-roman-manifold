@@ -186,6 +186,24 @@ const raycaster = new THREE.Raycaster();
 const screenCenter = new THREE.Vector2(0, 0);
 let crosshairIdx = -1;
 
+// Audio preview — single reused element, so a new play auto-cancels the previous.
+const audioEl = new Audio();
+audioEl.preload = 'none';
+audioEl.crossOrigin = 'anonymous';
+
+function playSampleAt(idx) {
+  if (idx < 0 || !points[idx]) return;
+  if (usingDemoData) return;
+  const id = points[idx].id;
+  if (id === undefined || id === null) return;
+  audioEl.src = API_BASE + '/audio/' + id;
+  audioEl.currentTime = 0;
+  audioEl.play().catch(() => {
+    searchStatus.textContent = 'audio failed';
+  });
+  searchStatus.textContent = '▶ ' + points[idx].filename;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Scale/position helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -588,7 +606,10 @@ function updateDestCloud() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 renderer.domElement.addEventListener('click', () => {
-  if (pointerLocked) return;
+  if (pointerLocked) {
+    if (crosshairIdx >= 0) playSampleAt(crosshairIdx);
+    return;
+  }
   renderer.domElement.requestPointerLock();
 });
 
@@ -611,6 +632,7 @@ document.addEventListener('keydown', (e) => {
   keys[e.code] = true;
   if (e.code === 'Escape' && pointerLocked) document.exitPointerLock();
   if (pointerLocked && (e.code === 'Space' || e.code.startsWith('Arrow'))) e.preventDefault();
+  if (e.code === 'KeyE' && crosshairIdx >= 0) playSampleAt(crosshairIdx);
 });
 
 document.addEventListener('keyup', (e) => { delete keys[e.code]; });
