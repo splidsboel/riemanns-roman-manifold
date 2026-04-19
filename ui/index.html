@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -34,13 +34,13 @@
 
   <!-- Theme + local + settings toggles (top-right) -->
   <button id="local-toggle" title="Local exploration mode">[ local: off ]</button>
-  <button id="theme-toggle" title="Toggle dark mode">[ dark ]</button>
+  <button id="theme-toggle" title="Toggle dark mode">[ light ]</button>
   <button id="settings-toggle" title="Settings">[ * ]</button>
   <div id="settings-panel" class="panel hidden">
     <div class="panel-label">SETTINGS</div>
     <div class="srow">
-      <label>CLUSTER DENSITY <span id="val-density">0.3</span></label>
-      <input type="range" id="sld-density" min="0.05" max="20" step="0.05" value="0.3">
+      <label>CLUSTER DENSITY <span id="val-density">3.0</span></label>
+      <input type="range" id="sld-density" min="0.05" max="20" step="0.05" value="3.0">
     </div>
     <div class="srow">
       <label>POINT SIZE <span id="val-pts">0.3</span></label>
@@ -51,12 +51,12 @@
       <input type="range" id="sld-spd" min="0.1" max="10" step="0.1" value="7.0">
     </div>
     <div class="srow">
-      <label>GLIDE <span id="val-glide">0.0</span></label>
-      <input type="range" id="sld-glide" min="0" max="1" step="0.05" value="0">
+      <label>GLIDE <span id="val-glide">0.2</span></label>
+      <input type="range" id="sld-glide" min="0" max="1" step="0.05" value="0.2">
     </div>
     <div class="srow">
-      <label>FOG <span id="val-fog">1.0</span></label>
-      <input type="range" id="sld-fog" min="0" max="1" step="0.05" value="1">
+      <label>FOG <span id="val-fog">0.0</span></label>
+      <input type="range" id="sld-fog" min="0" max="1" step="0.05" value="0">
     </div>
   </div>
 
