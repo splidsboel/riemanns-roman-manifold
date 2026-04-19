@@ -20,4 +20,5 @@ dependencies = [
     "soundfile",
     "msclap",
     "onnxruntime>=1.24.4",
+    "hdbscan>=0.8",
 ]
