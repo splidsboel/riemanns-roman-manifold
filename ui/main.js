@@ -47,9 +47,15 @@ const COLORS_DARK = {
 let darkMode = false;
 function theme() { return darkMode ? COLORS_DARK : COLORS; }
 
-// Cluster palette via golden-ratio HSL (matches samplevec)
-function clusterColor(c) {
-  if (c < 0) return new THREE.Color(0.55, 0.55, 0.60);
+// Cluster palette via golden-ratio HSL (matches samplevec).
+// Null / undefined / negative IDs are treated as HDBSCAN-style "noise" and
+// dimmed to a near-background tone so they recede instead of flashing red.
+// `isDark` controls the noise tone so light mode keeps a readable gray.
+function clusterColor(c, isDark = false) {
+  if (c === null || c === undefined || c < 0) {
+    return isDark ? new THREE.Color(0.22, 0.22, 0.28)
+                  : new THREE.Color(0.55, 0.55, 0.60);
+  }
   const h = (c * 0.618033988749895) % 1.0;
   return new THREE.Color().setHSL(h, 0.75, 0.62);
 }
@@ -120,30 +126,56 @@ uniform vec3  uMono;
 uniform vec3  uFogColor;
 uniform float uFogNear;
 uniform float uFogFar;
+uniform float uMinBright;
+uniform float uFogStrength;
 varying float vIllum;
 varying vec3  vColor;
 varying float vDist;
+
+// Gaussian × rational-reach spike, only extending in the +axis direction.
+// Used in dark mode to get samplevec's diffraction-spike star look.
+float spike(vec2 uv, vec2 axis) {
+  float along   = dot(uv, axis);
+  float perp    = dot(uv, vec2(-axis.y, axis.x));
+  float falloff = exp(-perp * perp * 200.0);
+  float reach   = 1.0 / (1.0 + along * along * 40.0 + pow(abs(along), 0.5) * 4.0);
+  return max(0.0, falloff * reach * step(0.0, along));
+}
+
 void main() {
   vec2 uv = gl_PointCoord - 0.5;
   float r = length(uv);
-  if (r > 0.5) discard;
-  float core = 1.0 - smoothstep(0.40, 0.50, r);
+
+  // Illumination pulse ring (shared by both themes — monochrome).
   float ring = 0.0;
   if (vIllum > 0.0) {
     float ringR = mix(0.42, 0.49, vIllum);
     ring = (1.0 - smoothstep(0.005, 0.025, abs(r - ringR))) * vIllum;
   }
-  float alpha = max(core, ring);
+
+  // Shape — light mode: hard round disc. Dark mode: soft core + 4 spikes.
+  float discMask = 1.0 - smoothstep(0.40, 0.50, r);
+  float core     = pow(1.0 - smoothstep(0.0, 0.5, r), 2.0);
+  float spikes   = spike(uv, vec2(1.0, 0.0))
+                 + spike(uv, vec2(-1.0, 0.0))
+                 + spike(uv, vec2(0.0, 1.0))
+                 + spike(uv, vec2(0.0, -1.0));
+  float starShape = clamp(core + spikes * 0.6, 0.0, 1.0);
+
+  float shape = mix(discMask, starShape, uDark);
+  float alpha = max(shape, ring);
   if (alpha < 0.01) discard;
-  // Light mode: monochrome black discs.
-  // Dark mode: per-cluster colors (ring pulse lightens toward white on illuminate).
+
+  // Light: monochrome black. Dark: per-cluster colour.
   vec3 col = mix(uMono, vColor, uDark);
   col = mix(col, vec3(1.0), ring * uDark);
-  // Depth cue — fade distant points toward the fog/background color so nearby
-  // points pop against the FPV camera. Illuminated points resist fading (so
-  // search results stay visible even when far away).
+
+  // Depth cue — fade toward fog/background, but floor at uMinBright so
+  // distant stars never fully vanish in dark mode.
   float fogAmt = smoothstep(uFogNear, uFogFar, vDist) * (1.0 - vIllum * 0.8);
+  fogAmt = fogAmt * (1.0 - uMinBright) * uFogStrength;
   col = mix(col, uFogColor, fogAmt);
+
   gl_FragColor = vec4(col, alpha);
 }`;
 
@@ -164,6 +196,7 @@ let ptsMult     = PT_SIZE_DEFAULT;
 let spdMult     = 7.0;
 let baseMoveSpd = 1;
 let basePtSize  = 0.1;
+let fogStrength = 1.0;
 
 // Controls
 let pointerLocked = false;
@@ -308,7 +341,7 @@ function buildLocalScene(data) {
 
   const colorAttr = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) {
-    const c = clusterColor(points[i].cluster);
+    const c = clusterColor(points[i].cluster, darkMode);
     colorAttr[i*3] = c.r; colorAttr[i*3+1] = c.g; colorAttr[i*3+2] = c.b;
   }
 
@@ -326,11 +359,14 @@ function buildLocalScene(data) {
       uFogColor: { value: new THREE.Color(theme().bg) },
       uFogNear:  { value: baseMaxDist * worldScale * 0.4 },
       uFogFar:   { value: baseMaxDist * worldScale * 2.5 },
+      uMinBright:{ value: darkMode ? 0.25 : 0.0 },
+      uFogStrength: { value: fogStrength },
     },
     vertexShader:   STAR_VERT,
     fragmentShader: STAR_FRAG,
     transparent:    true,
     depthWrite:     false,
+    blending:       darkMode ? THREE.AdditiveBlending : THREE.NormalBlending,
   });
 
   pointCloud = new THREE.Points(geo, mat);
@@ -990,8 +1026,21 @@ function applyTheme() {
   globalScene.background.setHex(t.bg);
 
   if (pointCloud) {
-    pointCloud.material.uniforms.uDark.value = darkMode ? 1.0 : 0.0;
-    pointCloud.material.uniforms.uFogColor.value.setHex(t.bg);
+    const mat = pointCloud.material;
+    mat.uniforms.uDark.value = darkMode ? 1.0 : 0.0;
+    mat.uniforms.uFogColor.value.setHex(t.bg);
+    mat.uniforms.uMinBright.value = darkMode ? 0.25 : 0.0;
+    mat.blending = darkMode ? THREE.AdditiveBlending : THREE.NormalBlending;
+    mat.needsUpdate = true;
+    // Re-derive per-vertex cluster colours so the noise tint tracks the theme.
+    const colorAttr = pointCloud.geometry.attributes.aColor;
+    for (let i = 0; i < points.length; i++) {
+      const c = clusterColor(points[i].cluster, darkMode);
+      colorAttr.array[i*3]   = c.r;
+      colorAttr.array[i*3+1] = c.g;
+      colorAttr.array[i*3+2] = c.b;
+    }
+    colorAttr.needsUpdate = true;
   }
   if (globalCube) globalCube.material.color.setHex(t.fg);
   if (globalCurrentMarker) globalCurrentMarker.material.color.setHex(t.accent);
@@ -1100,6 +1149,10 @@ initSlider('sld-density', 'val-density', v => { densityMult = v; recomputePositi
 initSlider('sld-pts',     'val-pts',     v => { ptsMult = v; if (pointCloud) updateStarUniforms(); });
 initSlider('sld-spd',     'val-spd',     v => { spdMult = v; moveSpeed = baseMoveSpd * spdMult; });
 initSlider('sld-glide',   'val-glide',   v => { glideMult = v; });
+initSlider('sld-fog',     'val-fog',     v => {
+  fogStrength = v;
+  if (pointCloud) pointCloud.material.uniforms.uFogStrength.value = v;
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Animation loop
