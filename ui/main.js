@@ -102,6 +102,7 @@ uniform float uSize;
 uniform float uScale;
 varying float vIllum;
 varying vec3  vColor;
+varying float vDist;
 void main() {
   vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mvPos;
@@ -110,13 +111,18 @@ void main() {
   gl_PointSize = uSize * sizeMul * (uScale / max(dist, 0.001));
   vIllum = aIllum;
   vColor = aColor;
+  vDist  = dist;
 }`;
 
 const STAR_FRAG = `
 uniform float uDark;
 uniform vec3  uMono;
+uniform vec3  uFogColor;
+uniform float uFogNear;
+uniform float uFogFar;
 varying float vIllum;
 varying vec3  vColor;
+varying float vDist;
 void main() {
   vec2 uv = gl_PointCoord - 0.5;
   float r = length(uv);
@@ -133,6 +139,11 @@ void main() {
   // Dark mode: per-cluster colors (ring pulse lightens toward white on illuminate).
   vec3 col = mix(uMono, vColor, uDark);
   col = mix(col, vec3(1.0), ring * uDark);
+  // Depth cue — fade distant points toward the fog/background color so nearby
+  // points pop against the FPV camera. Illuminated points resist fading (so
+  // search results stay visible even when far away).
+  float fogAmt = smoothstep(uFogNear, uFogFar, vDist) * (1.0 - vIllum * 0.8);
+  col = mix(col, uFogColor, fogAmt);
   gl_FragColor = vec4(col, alpha);
 }`;
 
@@ -221,6 +232,10 @@ function updateStarUniforms() {
   const u = pointCloud.material.uniforms;
   u.uSize.value  = basePtSize * ptsMult;
   u.uScale.value = 0.5 * renderer.domElement.height * camera.projectionMatrix.elements[5];
+  const md = baseMaxDist * worldScale;
+  u.uFogNear.value = md * 0.4;
+  u.uFogFar.value  = md * 2.5;
+  u.uFogColor.value.setHex(theme().bg);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -286,10 +301,13 @@ function buildLocalScene(data) {
 
   const mat = new THREE.ShaderMaterial({
     uniforms: {
-      uSize:  { value: basePtSize * ptsMult },
-      uScale: { value: 1.0 },
-      uDark:  { value: darkMode ? 1.0 : 0.0 },
-      uMono:  { value: new THREE.Color(0x000000) },
+      uSize:     { value: basePtSize * ptsMult },
+      uScale:    { value: 1.0 },
+      uDark:     { value: darkMode ? 1.0 : 0.0 },
+      uMono:     { value: new THREE.Color(0x000000) },
+      uFogColor: { value: new THREE.Color(theme().bg) },
+      uFogNear:  { value: baseMaxDist * worldScale * 0.4 },
+      uFogFar:   { value: baseMaxDist * worldScale * 2.5 },
     },
     vertexShader:   STAR_VERT,
     fragmentShader: STAR_FRAG,
@@ -738,7 +756,14 @@ async function doSearch() {
 
   // Any previous arrival-state is cancelled
   autoRotateActive = false;
-  setPointSize(PT_SIZE_DEFAULT);
+
+  // Auto-enter local mode (density bump only — pt size / speed applied at arrival).
+  // If already on, leave the user's density as-is; arrival step still applies.
+  if (!localModeActive) enterLocalMode({ applyArrival: false });
+
+  // Reset point size to default pre-travel (expand phase will animate to the final
+  // arrival size, which is smaller when local mode is active).
+  if (!localModeActive) setPointSize(PT_SIZE_DEFAULT);
 
   // ── Phase 1: Gimbal — rotate camera toward target without moving
   await runGimbal(target);
@@ -760,7 +785,11 @@ async function doSearch() {
   clearIllumination();
 
   // ── Phase 4: Expand point size 1.7 → 2.1 over ~0.5s (inside cluster)
-  await runExpand(PT_SIZE_ARRIVED);
+  //            In local mode, expand toward the smaller LOCAL_PT_SIZE instead
+  //            so the final size matches "exploration" settings, then snap move
+  //            speed down as well.
+  await runExpand(localModeActive ? LOCAL_PT_SIZE : PT_SIZE_ARRIVED);
+  if (localModeActive) applySpd(LOCAL_MOVE_SPEED);
 
   // ── Phase 5: Auto-rotation from FPV, so the user can see nearby points.
   //            Killed by any movement, mouse-look, or new search.
@@ -940,6 +969,7 @@ function applyTheme() {
 
   if (pointCloud) {
     pointCloud.material.uniforms.uDark.value = darkMode ? 1.0 : 0.0;
+    pointCloud.material.uniforms.uFogColor.value.setHex(t.bg);
   }
   if (globalCube) globalCube.material.color.setHex(t.fg);
   if (globalCurrentMarker) globalCurrentMarker.material.color.setHex(t.accent);
@@ -958,6 +988,81 @@ themeToggle.addEventListener('click', () => {
   applyTheme();
 });
 applyTheme();
+
+// ── Local exploration mode ─────────────────────────────────────────────────
+// Toggle to make dense clusters easier to explore:
+//   on enter: CLUSTER DENSITY *= 1.5 (clamped ≤ 2.0) so points spread apart
+//   on arrival (or on manual toggle mid-flight): POINT SIZE → 0.15, MOVE SPEED → 1.0
+//   on exit: restore the sliders to the values captured on entry
+// Auto-activates when a semantic search is triggered (if not already on).
+
+const LOCAL_DENSITY_VALUE = 1.1;
+const LOCAL_PT_SIZE       = 0.15;
+const LOCAL_MOVE_SPEED    = 1.0;
+
+const localToggle = document.getElementById('local-toggle');
+let localModeActive = false;
+let localSaved = null; // { density, pts, spd }
+
+function setSliderValue(id, valId, v, decimals = 1) {
+  const sld = document.getElementById(id);
+  const val = document.getElementById(valId);
+  if (sld) sld.value = String(v);
+  if (val) val.textContent = v.toFixed(decimals);
+}
+
+function applyDensity(v) {
+  densityMult = v;
+  setSliderValue('sld-density', 'val-density', v);
+  recomputePositions();
+}
+function applyPts(v) {
+  ptsMult = v;
+  setSliderValue('sld-pts', 'val-pts', v);
+  if (pointCloud) updateStarUniforms();
+}
+function applySpd(v) {
+  spdMult = v;
+  setSliderValue('sld-spd', 'val-spd', v);
+  moveSpeed = baseMoveSpd * spdMult;
+}
+
+function enterLocalMode(opts = { applyArrival: true }) {
+  if (localModeActive) return;
+  localModeActive = true;
+  localSaved = { density: densityMult, pts: ptsMult, spd: spdMult };
+  applyDensity(LOCAL_DENSITY_VALUE);
+  if (opts.applyArrival) {
+    applyPts(LOCAL_PT_SIZE);
+    applySpd(LOCAL_MOVE_SPEED);
+  }
+  localToggle.classList.add('active');
+  localToggle.textContent = '[ local: on ]';
+}
+
+function applyLocalArrival() {
+  if (!localModeActive) return;
+  applyPts(LOCAL_PT_SIZE);
+  applySpd(LOCAL_MOVE_SPEED);
+}
+
+function exitLocalMode() {
+  if (!localModeActive) return;
+  localModeActive = false;
+  if (localSaved) {
+    applyDensity(localSaved.density);
+    applyPts(localSaved.pts);
+    applySpd(localSaved.spd);
+    localSaved = null;
+  }
+  localToggle.classList.remove('active');
+  localToggle.textContent = '[ local: off ]';
+}
+
+localToggle.addEventListener('click', () => {
+  if (localModeActive) exitLocalMode();
+  else enterLocalMode({ applyArrival: true });
+});
 
 function initSlider(id, valId, onChange) {
   const el = document.getElementById(id);

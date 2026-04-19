@@ -167,7 +167,7 @@ canvas { display: block; }
 }
 
 /* ── Settings (top-right) ───────────────────────────────────────────── */
-#settings-toggle, #theme-toggle {
+#settings-toggle, #theme-toggle, #local-toggle {
   position: fixed;
   top: 16px;
   background: var(--panel-bg);
@@ -183,8 +183,10 @@ canvas { display: block; }
 
 #settings-toggle { right: 16px; }
 #theme-toggle    { right: 64px; }
+#local-toggle    { right: 120px; }
+#local-toggle.active { background: var(--fg); color: var(--bg); }
 
-#settings-toggle:hover, #theme-toggle:hover { background: var(--fg); color: var(--bg); }
+#settings-toggle:hover, #theme-toggle:hover, #local-toggle:hover { background: var(--fg); color: var(--bg); }
 
 #settings-panel {
   top: 54px;
