@@ -19,4 +19,5 @@ dependencies = [
     "music21",
     "soundfile",
     "msclap",
+    "onnxruntime>=1.24.4",
 ]

@@ -11,6 +11,15 @@
   --font-mono: 'JetBrains Mono', 'IBM Plex Mono', 'Courier New', monospace;
 }
 
+:root[data-theme="dark"] {
+  --fg: #cdd6f4;
+  --bg: #11111b;
+  --border: #45475a;
+  --muted: #6c7086;
+  --accent: #89b4fa;
+  --panel-bg: rgba(24, 24, 37, 0.92);
+}
+
 body {
   background: var(--bg);
   color: var(--fg);
@@ -158,10 +167,9 @@ canvas { display: block; }
 }
 
 /* ── Settings (top-right) ───────────────────────────────────────────── */
-#settings-toggle {
+#settings-toggle, #theme-toggle {
   position: fixed;
   top: 16px;
-  right: 16px;
   background: var(--panel-bg);
   border: 1px solid var(--border);
   color: var(--fg);
@@ -173,7 +181,10 @@ canvas { display: block; }
   z-index: 11;
 }
 
-#settings-toggle:hover { background: var(--fg); color: var(--bg); }
+#settings-toggle { right: 16px; }
+#theme-toggle    { right: 64px; }
+
+#settings-toggle:hover, #theme-toggle:hover { background: var(--fg); color: var(--bg); }
 
 #settings-panel {
   top: 54px;

@@ -1,3 +1,4 @@
+import threading
 import uuid
 from pathlib import Path
 
@@ -10,12 +11,15 @@ from pipeline.run import run_pipeline
 from shared.database import Sample, get_session
 
 from .search import search_samples
+from .umap_service import get_status as umap_status
+from .umap_service import trigger_recompute
 
 app = FastAPI(title="riemanns-roman-manifold")
 
 UI_DIR = Path(__file__).resolve().parents[1] / "ui"
 
 JOBS: dict[str, dict] = {}
+JOBS_LOCK = threading.Lock()
 
 
 class SearchRequest(BaseModel):
@@ -30,7 +34,21 @@ class PipelineRunRequest(BaseModel):
 @app.get("/visualization/status")
 def visualization_status(db: Session = Depends(get_session)):
     count = db.query(Sample).count()
-    return {"ready": count > 0, "index_count": count, "computing": False}
+    u = umap_status()
+    return {
+        "ready": count > 0 and not u["computing"],
+        "index_count": count,
+        "computing": u["computing"],
+        "current_job_id": u["current_job_id"],
+        "last_finished_at": u["last_finished_at"],
+        "last_error": u["last_error"],
+    }
+
+
+@app.post("/visualization/recompute")
+def visualization_recompute():
+    result = trigger_recompute()
+    return {"job_id": result["job_id"], "started": result["started"]}
 
 
 @app.get("/visualization/layout")
@@ -67,16 +85,18 @@ def search(req: SearchRequest, db: Session = Depends(get_session)):
 @app.post("/pipeline/run")
 def start_pipeline(req: PipelineRunRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
-    JOBS[job_id] = {'status': 'queued', 'processed': 0, 'total': 0, 'errors': []}
-    background_tasks.add_task(run_pipeline, req.directory, job_id, JOBS)
+    with JOBS_LOCK:
+        JOBS[job_id] = {'status': 'queued', 'processed': 0, 'total': 0, 'errors': []}
+    background_tasks.add_task(run_pipeline, req.directory, job_id, JOBS, JOBS_LOCK)
     return {'job_id': job_id}
 
 
 @app.get("/pipeline/status/{job_id}")
 def pipeline_status(job_id: str):
-    if job_id not in JOBS:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return JOBS[job_id]
+    with JOBS_LOCK:
+        if job_id not in JOBS:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return dict(JOBS[job_id])
 
 
 # UI static files — mounted last so explicit API routes above take precedence.
