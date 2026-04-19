@@ -37,6 +37,23 @@ const COLORS = {
   muted:   0x888888,
 };
 
+const COLORS_DARK = {
+  fg:      0xcdd6f4,
+  bg:      0x11111b,
+  accent:  0x89b4fa,
+  muted:   0x6c7086,
+};
+
+let darkMode = false;
+function theme() { return darkMode ? COLORS_DARK : COLORS; }
+
+// Cluster palette via golden-ratio HSL (matches samplevec)
+function clusterColor(c) {
+  if (c < 0) return new THREE.Color(0.55, 0.55, 0.60);
+  const h = (c * 0.618033988749895) % 1.0;
+  return new THREE.Color().setHSL(h, 0.75, 0.62);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DOM refs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -57,7 +74,7 @@ const globalCanvas    = document.getElementById('canvas-global');
 // ─────────────────────────────────────────────────────────────────────────────
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(COLORS.bg);
+scene.background = new THREE.Color(theme().bg);
 scene.fog = null;
 
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 5000);
@@ -80,28 +97,30 @@ window.addEventListener('resize', () => {
 
 const STAR_VERT = `
 attribute float aIllum;
+attribute vec3  aColor;
 uniform float uSize;
 uniform float uScale;
 varying float vIllum;
+varying vec3  vColor;
 void main() {
   vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mvPos;
   float dist = -mvPos.z;
-  // Illuminated points get a size pulse (up to ~1.6x)
   float sizeMul = 1.0 + aIllum * 0.6;
   gl_PointSize = uSize * sizeMul * (uScale / max(dist, 0.001));
   vIllum = aIllum;
+  vColor = aColor;
 }`;
 
 const STAR_FRAG = `
+uniform float uDark;
+uniform vec3  uMono;
 varying float vIllum;
+varying vec3  vColor;
 void main() {
   vec2 uv = gl_PointCoord - 0.5;
   float r = length(uv);
   if (r > 0.5) discard;
-  // Round black point with anti-aliased edge.
-  // Illuminated points: the disc grows AND a thin ring radiates outward,
-  // giving a "lights up in black" pulse without leaving the B/W palette.
   float core = 1.0 - smoothstep(0.40, 0.50, r);
   float ring = 0.0;
   if (vIllum > 0.0) {
@@ -110,7 +129,11 @@ void main() {
   }
   float alpha = max(core, ring);
   if (alpha < 0.01) discard;
-  gl_FragColor = vec4(0.0, 0.0, 0.0, alpha);
+  // Light mode: monochrome black discs.
+  // Dark mode: per-cluster colors (ring pulse lightens toward white on illuminate).
+  vec3 col = mix(uMono, vColor, uDark);
+  col = mix(col, vec3(1.0), ring * uDark);
+  gl_FragColor = vec4(col, alpha);
 }`;
 
 let points = [];                   // [{path, filename, x, y, z, cluster}]
@@ -135,6 +158,8 @@ let basePtSize  = 0.1;
 let pointerLocked = false;
 const keys = {};
 let moveSpeed = 1.0;
+let glideMult = 0.0;                        // 0 = instant stop; 1 = very slippery
+const velocity = new THREE.Vector3();       // current velocity (units / sec)
 
 // Animation state
 let flyAnim    = null;  // local-world camera fly
@@ -248,14 +273,23 @@ function buildLocalScene(data) {
     if (d > baseMaxDist) baseMaxDist = d;
   }
 
+  const colorAttr = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const c = clusterColor(points[i].cluster);
+    colorAttr[i*3] = c.r; colorAttr[i*3+1] = c.g; colorAttr[i*3+2] = c.b;
+  }
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
   geo.setAttribute('aIllum',   new THREE.BufferAttribute(illumAttr, 1));
+  geo.setAttribute('aColor',   new THREE.BufferAttribute(colorAttr, 3));
 
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       uSize:  { value: basePtSize * ptsMult },
       uScale: { value: 1.0 },
+      uDark:  { value: darkMode ? 1.0 : 0.0 },
+      uMono:  { value: new THREE.Color(0x000000) },
     },
     vertexShader:   STAR_VERT,
     fragmentShader: STAR_FRAG,
@@ -297,7 +331,7 @@ function clearIllumination() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const globalScene = new THREE.Scene();
-globalScene.background = new THREE.Color(COLORS.bg);
+globalScene.background = new THREE.Color(theme().bg);
 
 const globalCamera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
 // More side-on viewing angle (slight elevation instead of corner-isometric)
@@ -312,22 +346,69 @@ const globalGroup = new THREE.Group();
 globalScene.add(globalGroup);
 
 let globalCube = null;
-let globalCurrentMarker = null;  // red sphere — current location
-let globalDestMarker    = null;  // red sphere — destination
-let globalTravelLine    = null;  // black line from current to destination
+let globalCurrentMarker = null;  // accent-color sphere — current location
+let globalDestMarker    = null;  // accent-color sphere — destination
+let globalTravelLine    = null;  // line from current to destination
+let globalMiniCloud     = null;  // static UMAP-reduced points inside the cube
 
 function buildGlobalScene() {
-  // 1×1×1 wireframe cube, edges only — angular box
   const cubeGeo = new THREE.BoxGeometry(1, 1, 1);
   const edges = new THREE.EdgesGeometry(cubeGeo);
-  globalCube = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: COLORS.fg }));
+  globalCube = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: theme().fg }));
   globalGroup.add(globalCube);
 
-  // Current location marker (red sphere)
   const sphereGeo = new THREE.SphereGeometry(0.04, 16, 16);
-  const redMat    = new THREE.MeshBasicMaterial({ color: COLORS.accent });
-  globalCurrentMarker = new THREE.Mesh(sphereGeo, redMat);
+  const markerMat = new THREE.MeshBasicMaterial({ color: theme().accent });
+  globalCurrentMarker = new THREE.Mesh(sphereGeo, markerMat);
   globalGroup.add(globalCurrentMarker);
+
+  buildGlobalMiniCloud();
+}
+
+// Static mini-representation of all embeddings, normalized into [-0.5, 0.5]^3.
+// Built once from rawPos (the raw UMAP coords), independent of worldScale.
+function buildGlobalMiniCloud() {
+  if (!rawPos) return;
+  if (globalMiniCloud) {
+    globalGroup.remove(globalMiniCloud);
+    globalMiniCloud.geometry.dispose();
+    globalMiniCloud.material.dispose();
+    globalMiniCloud = null;
+  }
+  const n = rawPos.length / 3;
+  let maxAbs = 0;
+  for (let i = 0; i < n; i++) {
+    const x = rawPos[i*3]   - cloudCenter.x;
+    const y = rawPos[i*3+1] - cloudCenter.y;
+    const z = rawPos[i*3+2] - cloudCenter.z;
+    const m = Math.max(Math.abs(x), Math.abs(y), Math.abs(z));
+    if (m > maxAbs) maxAbs = m;
+  }
+  const scale = maxAbs > 0 ? 0.48 / maxAbs : 1;
+
+  const pos = new Float32Array(n * 3);
+  const col = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    pos[i*3]   = (rawPos[i*3]   - cloudCenter.x) * scale;
+    pos[i*3+1] = (rawPos[i*3+1] - cloudCenter.y) * scale;
+    pos[i*3+2] = (rawPos[i*3+2] - cloudCenter.z) * scale;
+    const c = clusterColor(points[i].cluster);
+    col[i*3] = c.r; col[i*3+1] = c.g; col[i*3+2] = c.b;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(col, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 0.012,
+    sizeAttenuation: true,
+    vertexColors: darkMode,
+    color: darkMode ? 0xffffff : theme().fg,
+    transparent: true,
+    opacity: darkMode ? 0.9 : 0.65,
+    depthWrite: false,
+  });
+  globalMiniCloud = new THREE.Points(geo, mat);
+  globalGroup.add(globalMiniCloud);
 }
 
 // Map a local-world position into the global cube ([-0.5..0.5]^3)
@@ -378,13 +459,13 @@ function setGlobalDestination(localTarget) {
   const start = localToGlobal(camera.position);
 
   const sphereGeo = new THREE.SphereGeometry(0.04, 16, 16);
-  const redMat    = new THREE.MeshBasicMaterial({ color: COLORS.accent });
-  globalDestMarker = new THREE.Mesh(sphereGeo, redMat);
+  const markerMat = new THREE.MeshBasicMaterial({ color: theme().accent });
+  globalDestMarker = new THREE.Mesh(sphereGeo, markerMat);
   globalDestMarker.position.copy(dest);
   globalGroup.add(globalDestMarker);
 
   const lineGeo = new THREE.BufferGeometry().setFromPoints([start, dest]);
-  const lineMat = new THREE.LineBasicMaterial({ color: COLORS.fg });
+  const lineMat = new THREE.LineBasicMaterial({ color: theme().fg });
   globalTravelLine = new THREE.Line(lineGeo, lineMat);
   globalGroup.add(globalTravelLine);
 }
@@ -423,22 +504,26 @@ function easeOutCubic(t) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 let destCloud = null;
-let cloudTex  = null;
+let cloudTexLight = null;
+let cloudTexDark  = null;
 
-function ensureCloudTexture() {
-  if (cloudTex) return cloudTex;
+function makeCloudTexture(rgb) {
   const size = 256;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d');
   const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
-  g.addColorStop(0.00, 'rgba(0,0,0,0.55)');
-  g.addColorStop(0.35, 'rgba(0,0,0,0.20)');
-  g.addColorStop(1.00, 'rgba(0,0,0,0.00)');
+  g.addColorStop(0.00, `rgba(${rgb},0.55)`);
+  g.addColorStop(0.35, `rgba(${rgb},0.20)`);
+  g.addColorStop(1.00, `rgba(${rgb},0.00)`);
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, size, size);
-  cloudTex = new THREE.CanvasTexture(canvas);
-  return cloudTex;
+  return new THREE.CanvasTexture(canvas);
+}
+
+function ensureCloudTexture() {
+  if (darkMode) return cloudTexDark  ||= makeCloudTexture('205,214,244');
+  return          cloudTexLight ||= makeCloudTexture('0,0,0');
 }
 
 function spawnDestCloud(centroid, radius) {
@@ -516,28 +601,53 @@ renderer.domElement.addEventListener('wheel', (e) => {
   moveSpeed = Math.max(0.005, Math.min(60, moveSpeed * (e.deltaY > 0 ? 1.25 : 0.8)));
 }, { passive: true });
 
-function updateMovement() {
-  const active = keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD'] ||
-                 keys['Space'] || keys['ShiftLeft'] || keys['ShiftRight'] ||
-                 keys['ArrowUp'] || keys['ArrowDown'] || keys['ArrowLeft'] || keys['ArrowRight'];
+function updateMovement(dt) {
+  const active = pointerLocked && (
+    keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD'] ||
+    keys['Space'] || keys['ShiftLeft'] || keys['ShiftRight'] ||
+    keys['ArrowUp'] || keys['ArrowDown'] || keys['ArrowLeft'] || keys['ArrowRight']);
   if (active) autoRotateActive = false;
-  if (!active) return;
 
   const sy = Math.sin(camera.rotation.y);
   const cy = Math.cos(camera.rotation.y);
   let dx = 0, dy = 0, dz = 0;
 
-  if (keys['KeyW'] || keys['ArrowUp'])    { dx -= sy; dz -= cy; }
-  if (keys['KeyS'] || keys['ArrowDown'])  { dx += sy; dz += cy; }
-  if (keys['KeyA'] || keys['ArrowLeft'])  { dx -= cy; dz += sy; }
-  if (keys['KeyD'] || keys['ArrowRight']) { dx += cy; dz -= sy; }
-  if (keys['Space'])                       dy += 1;
-  if (keys['ShiftLeft'] || keys['ShiftRight']) dy -= 1;
+  if (active) {
+    if (keys['KeyW'] || keys['ArrowUp'])    { dx -= sy; dz -= cy; }
+    if (keys['KeyS'] || keys['ArrowDown'])  { dx += sy; dz += cy; }
+    if (keys['KeyA'] || keys['ArrowLeft'])  { dx -= cy; dz += sy; }
+    if (keys['KeyD'] || keys['ArrowRight']) { dx += cy; dz -= sy; }
+    if (keys['Space'])                       dy += 1;
+    if (keys['ShiftLeft'] || keys['ShiftRight']) dy -= 1;
+    const len = Math.sqrt(dx*dx + dy*dy + dz*dz) || 1;
+    dx /= len; dy /= len; dz /= len;
+  }
 
-  const len = Math.sqrt(dx*dx + dy*dy + dz*dz) || 1;
-  camera.position.x += (dx/len) * moveSpeed;
-  camera.position.y += (dy/len) * moveSpeed;
-  camera.position.z += (dz/len) * moveSpeed;
+  // Desired velocity (units/sec). moveSpeed is per-frame at ~60fps, so scale.
+  const targetSpd = moveSpeed * 60;
+  const tx = dx * targetSpd, ty = dy * targetSpd, tz = dz * targetSpd;
+
+  if (glideMult <= 0.0001) {
+    // No glide — legacy instant stop, step by per-frame moveSpeed
+    velocity.set(0, 0, 0);
+    camera.position.x += dx * moveSpeed;
+    camera.position.y += dy * moveSpeed;
+    camera.position.z += dz * moveSpeed;
+    return;
+  }
+
+  // Exponential damping toward target velocity. tau grows with glideMult so the
+  // camera feels progressively more like "ice in Minecraft".
+  //   glide=0.05 → tau≈0.05s (snappy);  glide=1.0 → tau≈1.2s (very slippery)
+  const tau = 0.05 + glideMult * 1.15;
+  const k   = 1 - Math.exp(-dt / tau);
+  velocity.x += (tx - velocity.x) * k;
+  velocity.y += (ty - velocity.y) * k;
+  velocity.z += (tz - velocity.z) * k;
+
+  camera.position.x += velocity.x * dt;
+  camera.position.y += velocity.y * dt;
+  camera.position.z += velocity.z * dt;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -814,6 +924,41 @@ settingsToggle.addEventListener('click', () => {
   settingsPanel.classList.toggle('hidden');
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Theme toggle — light (monochrome) ↔ dark (samplevec palette, cluster colors)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const themeToggle = document.getElementById('theme-toggle');
+
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
+  themeToggle.textContent = darkMode ? '[ light ]' : '[ dark ]';
+
+  const t = theme();
+  scene.background.setHex(t.bg);
+  globalScene.background.setHex(t.bg);
+
+  if (pointCloud) {
+    pointCloud.material.uniforms.uDark.value = darkMode ? 1.0 : 0.0;
+  }
+  if (globalCube) globalCube.material.color.setHex(t.fg);
+  if (globalCurrentMarker) globalCurrentMarker.material.color.setHex(t.accent);
+  if (globalDestMarker)    globalDestMarker.material.color.setHex(t.accent);
+  if (globalTravelLine)    globalTravelLine.material.color.setHex(t.fg);
+  if (globalMiniCloud) {
+    globalMiniCloud.material.vertexColors = darkMode;
+    globalMiniCloud.material.color.setHex(darkMode ? 0xffffff : t.fg);
+    globalMiniCloud.material.opacity = darkMode ? 0.9 : 0.65;
+    globalMiniCloud.material.needsUpdate = true;
+  }
+}
+
+themeToggle.addEventListener('click', () => {
+  darkMode = !darkMode;
+  applyTheme();
+});
+applyTheme();
+
 function initSlider(id, valId, onChange) {
   const el = document.getElementById(id);
   const valEl = document.getElementById(valId);
@@ -827,6 +972,7 @@ function initSlider(id, valId, onChange) {
 initSlider('sld-density', 'val-density', v => { densityMult = v; recomputePositions(); });
 initSlider('sld-pts',     'val-pts',     v => { ptsMult = v; if (pointCloud) updateStarUniforms(); });
 initSlider('sld-spd',     'val-spd',     v => { spdMult = v; moveSpeed = baseMoveSpd * spdMult; });
+initSlider('sld-glide',   'val-glide',   v => { glideMult = v; });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Animation loop
@@ -839,7 +985,7 @@ function animate(now) {
   const dt = Math.min((now - lastTime) / 1000, 0.1);
   lastTime = now;
 
-  if (pointerLocked) updateMovement();
+  updateMovement(dt);
   updateAutoRotate(dt);
   updateGimbal(now);
   updateIlluminate(now);
@@ -859,26 +1005,37 @@ requestAnimationFrame(animate);
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function pollAndLoad() {
+  // Kick off a fresh UMAP fit so the browser always sees coords that reflect
+  // the latest embeddings — including anything the pipeline has just finished
+  // processing. Single-flight server-side, so multiple tabs coalesce.
+  try {
+    await fetch(API_BASE + '/visualization/recompute', { method: 'POST' });
+    overlayMsg.textContent = 'recomputing 3D layout…';
+  } catch {
+    // Backend unreachable — fall through to the polling loop, which will
+    // catch the same error and use the demo cloud fallback.
+  }
+
   while (true) {
     try {
       const s = await fetch(API_BASE + '/visualization/status').then(r => r.json());
-      if (s.ready) {
+      if (s.computing) {
+        overlayMsg.textContent = 'recomputing 3D layout…';
+      } else if (s.index_count === 0) {
+        overlayMsg.textContent = 'index is empty — process samples first';
+        return;
+      } else if (s.ready) {
         overlayMsg.textContent = 'building scene…';
         const data = await fetch(API_BASE + '/visualization/layout').then(r => r.json());
         if (data.points && data.points.length > 0) {
           buildLocalScene(data);
           return;
         }
-      } else if (s.index_count === 0) {
-        overlayMsg.textContent = 'index is empty — process samples first';
-        return;
-      } else if (s.computing) {
-        overlayMsg.textContent = 'computing 3D layout…';
+        overlayMsg.textContent = 'preparing layout…';
       } else {
         overlayMsg.textContent = 'preparing layout…';
       }
     } catch {
-      // Backend not ready — fall back to demo data so the UI is usable standalone
       overlayMsg.textContent = 'backend unreachable — loading demo cloud';
       usingDemoData = true;
       buildLocalScene(generateDemoData());

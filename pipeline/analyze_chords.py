@@ -12,6 +12,7 @@ Usage:
 
 import contextlib
 import io
+import os
 import re
 import tempfile
 from collections import Counter
@@ -68,9 +69,10 @@ def _get_harmonic_mix(audio_path: Path) -> Path:
     if peak > 0:
         mixed = mixed / peak * 0.9
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    sf.write(tmp.name, mixed, sr)
-    return Path(tmp.name)
+    fd, tmp_name = tempfile.mkstemp(suffix=".wav", prefix="harmonic_mix_")
+    os.close(fd)
+    sf.write(tmp_name, mixed, sr)
+    return Path(tmp_name)
 
 
 def _extract_notes(audio_path: Path) -> list:
@@ -321,22 +323,19 @@ def analyze_chords(audio_path: Path | str) -> list[dict]:
     """
     audio_path = Path(audio_path)
 
-    print(f"[analyze_chords] Separating stems: {audio_path.name}")
     harmonic_mix = _get_harmonic_mix(audio_path)
+    is_tempfile = harmonic_mix != audio_path
 
-    print("[analyze_chords] Running basic-pitch note extraction...")
-    note_events = _extract_notes(harmonic_mix)
-
-    duration_sec = sf.info(str(harmonic_mix)).duration
-
-    print(f"[analyze_chords] Detected {len(note_events)} note events. Building chord groups...")
-    chord_groups = _build_chord_groups(note_events)
-    print(f"[analyze_chords] Built {len(chord_groups)} chord groups. Detecting sections...")
-
-    key = _detect_key(note_events, chord_groups)
-    print(f"[analyze_chords] Key (refined): {key}")
-
-    sections = _detect_sections(chord_groups, key, duration_sec)
-    print(f"[analyze_chords] Found {len(sections)} section(s).")
-
-    return sections
+    try:
+        note_events = _extract_notes(harmonic_mix)
+        duration_sec = sf.info(str(harmonic_mix)).duration
+        chord_groups = _build_chord_groups(note_events)
+        key = _detect_key(note_events, chord_groups)
+        sections = _detect_sections(chord_groups, key, duration_sec)
+        return sections
+    finally:
+        if is_tempfile:
+            try:
+                harmonic_mix.unlink()
+            except OSError:
+                pass

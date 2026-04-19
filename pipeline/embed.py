@@ -16,5 +16,7 @@ def _get_model() -> CLAP:
 
 def embed_audio(audio_path: Path) -> np.ndarray:
     """Return a 512-dim CLAP embedding for the given audio file."""
-    embeddings = _get_model().get_audio_embeddings([str(audio_path)])
-    return np.array(embeddings[0])
+    emb = _get_model().get_audio_embeddings([str(audio_path)])[0]
+    if isinstance(emb, torch.Tensor):
+        emb = emb.detach().cpu().numpy()
+    return np.asarray(emb)
