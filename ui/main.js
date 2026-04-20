@@ -44,7 +44,7 @@ const COLORS_DARK = {
   muted:   0x6c7086,
 };
 
-let darkMode = false;
+let darkMode = true;
 function theme() { return darkMode ? COLORS_DARK : COLORS; }
 
 // Cluster palette via golden-ratio HSL (matches samplevec).
@@ -191,18 +191,18 @@ let cloudCenter = new THREE.Vector3();
 
 // Slider state
 let worldScale  = 40;
-let densityMult = 0.3;
+let densityMult = 3.0;
 let ptsMult     = PT_SIZE_DEFAULT;
 let spdMult     = 7.0;
 let baseMoveSpd = 1;
 let basePtSize  = 0.1;
-let fogStrength = 1.0;
+let fogStrength = 0.0;
 
 // Controls
 let pointerLocked = false;
 const keys = {};
 let moveSpeed = 1.0;
-let glideMult = 0.0;                        // 0 = instant stop; 1 = very slippery
+let glideMult = 0.2;                        // 0 = instant stop; 1 = very slippery
 const velocity = new THREE.Vector3();       // current velocity (units / sec)
 
 // Animation state
@@ -1067,7 +1067,7 @@ applyTheme();
 //   on exit: restore the sliders to the values captured on entry
 // Auto-activates when a semantic search is triggered (if not already on).
 
-const LOCAL_DENSITY_VALUE = 1.1;
+const LOCAL_DENSITY_VALUE = 6.5;
 const LOCAL_PT_SIZE       = 0.15;
 const LOCAL_MOVE_SPEED    = 1.0;
 

@@ -182,8 +182,8 @@ canvas { display: block; }
 }
 
 #settings-toggle { right: 16px; }
-#theme-toggle    { right: 64px; }
-#local-toggle    { right: 120px; }
+#theme-toggle    { right: 72px; }
+#local-toggle    { right: 152px; }
 #local-toggle.active { background: var(--fg); color: var(--bg); }
 
 #settings-toggle:hover, #theme-toggle:hover, #local-toggle:hover { background: var(--fg); color: var(--bg); }
@@ -217,6 +217,28 @@ canvas { display: block; }
   cursor: pointer;
   height: 2px;
   background: var(--fg);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.srow input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg);
+  border: none;
+  cursor: pointer;
+}
+
+.srow input[type=range]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg);
+  border: none;
+  cursor: pointer;
 }
 
 /* ── HUD (cheat sheet) ──────────────────────────────────────────────── */
