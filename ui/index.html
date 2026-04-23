@@ -33,9 +33,20 @@
   </div>
 
   <!-- Theme + local + settings toggles (top-right) -->
+  <button id="presence-indicator" title="Connected users">[ offline ]</button>
+  <button id="name-toggle" title="Change handle">[ name ]</button>
   <button id="local-toggle" title="Local exploration mode">[ local: off ]</button>
   <button id="theme-toggle" title="Toggle dark mode">[ light ]</button>
   <button id="settings-toggle" title="Settings">[ * ]</button>
+
+  <!-- Handle prompt (shown on first load / when editing name) -->
+  <div id="handle-modal" class="hidden">
+    <div class="panel" id="handle-panel">
+      <div class="panel-label">ENTER HANDLE</div>
+      <input id="handle-input" type="text" maxlength="16" spellcheck="false" autocomplete="off" placeholder="e.g. ada" />
+      <button id="handle-submit">[ enter ]</button>
+    </div>
+  </div>
   <div id="settings-panel" class="panel hidden">
     <div class="panel-label">SETTINGS</div>
     <div class="srow">
@@ -58,6 +69,16 @@
       <label>FOG <span id="val-fog">0.0</span></label>
       <input type="range" id="sld-fog" min="0" max="1" step="0.05" value="0">
     </div>
+    <div class="srow">
+      <label>PLAYER SIZE <span id="val-avatar">1.0</span></label>
+      <input type="range" id="sld-avatar" min="0.3" max="50" step="0.1" value="1.0">
+    </div>
+  </div>
+
+  <!-- Players dropdown (opens from presence chip) -->
+  <div id="players-panel" class="panel hidden">
+    <div class="panel-label">TELEPORT TO</div>
+    <div id="players-list"></div>
   </div>
 
   <!-- HUD (bottom-left below search) -->

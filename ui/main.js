@@ -812,6 +812,10 @@ async function doSearch() {
   searchStatus.textContent = `${matchIndices.length} results · navigating`;
   searchInput.blur();
 
+  // Broadcast to other users so their local copy of this avatar replays
+  // the same gimbal+travel flight. Illumination stays personal.
+  sendSearch(target, radius * 0.3);
+
   // Any previous arrival-state is cancelled
   autoRotateActive = false;
 
@@ -1052,6 +1056,20 @@ function applyTheme() {
     globalMiniCloud.material.opacity = darkMode ? 0.9 : 0.65;
     globalMiniCloud.material.needsUpdate = true;
   }
+  // Remotes live in a let-binding declared later in the file; on first call
+  // (boot) they are still in TDZ, so guard with try/catch rather than typeof.
+  try {
+    const avatarHex = darkMode ? 0xffffff : 0x000000;
+    for (const r of remotes.values()) {
+      r.sphere.material.color.setHex(avatarHex);
+      r.fwdLine.material.color.setHex(avatarHex);
+      r.haloMat.color.setHex(avatarHex);
+      r.haloMat.blending = darkMode ? THREE.AdditiveBlending : THREE.NormalBlending;
+      r.haloMat.needsUpdate = true;
+      r.beaconMat.color.setHex(avatarHex);
+      updateAvatarLabel(r, r.handle);
+    }
+  } catch {}
 }
 
 themeToggle.addEventListener('click', () => {
@@ -1153,6 +1171,553 @@ initSlider('sld-fog',     'val-fog',     v => {
   fogStrength = v;
   if (pointCloud) pointCloud.material.uniforms.uFogStrength.value = v;
 });
+initSlider('sld-avatar',  'val-avatar',  v => {
+  avatarScale = v;
+  try { for (const r of remotes.values()) r.group.scale.setScalar(v); } catch {}
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multiplayer — presence + search replay over WebSocket
+// ─────────────────────────────────────────────────────────────────────────────
+// Pure relay on the server; each client broadcasts its pose (throttled 20 Hz,
+// skip if not moving) and its search events (target + offset, startT). Remote
+// avatars = small sphere + forward line + billboarded handle sprite. Receiver
+// lerps between the last two pose snapshots for smoothness; remote search is
+// replayed locally by rotating then translating the avatar over PHASE.*_MS.
+
+const MP_POSE_HZ       = 20;
+const MP_POSE_INTERVAL = 1000 / MP_POSE_HZ;
+const MP_PING_MS       = 5000;
+const MP_AVATAR_R      = 0.9;   // sphere radius in world units
+const MP_FWD_LEN       = 3.0;   // forward line length
+const MP_LABEL_H       = 2.2;   // label vertical offset
+const MP_HALO_MULT     = 5.0;   // halo sprite radius = sphere radius * this
+const MP_BEACON_HALF   = 120;   // vertical beacon reaches ±this from avatar
+const MP_LABEL_W       = 4.2;   // label world width
+
+let mpHaloTex = null;
+function ensureHaloTex() {
+  if (mpHaloTex) return mpHaloTex;
+  const size = 128;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  g.addColorStop(0.00, 'rgba(255,255,255,0.85)');
+  g.addColorStop(0.25, 'rgba(255,255,255,0.45)');
+  g.addColorStop(0.60, 'rgba(255,255,255,0.10)');
+  g.addColorStop(1.00, 'rgba(255,255,255,0.00)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  mpHaloTex = new THREE.CanvasTexture(c);
+  return mpHaloTex;
+}
+
+const remotes = new Map(); // id -> { handle, group, sphere, fwdLine, label, labelMat,
+                           //        lastPose, prevPose, lastPoseT,
+                           //        miniDot, searchAnim }
+
+let avatarScale = 1.0;
+
+let mpSocket = null;
+let mpUserId = null;
+let mpHandle = localStorage.getItem('handle') || '';
+let mpLastPoseSent = 0;
+let mpLastPoseP = new THREE.Vector3(NaN, NaN, NaN);
+let mpLastPoseRx = NaN, mpLastPoseRy = NaN;
+let mpLastTrafficT = 0;
+
+// ── Handle prompt ──────────────────────────────────────────────────────────
+const handleModal   = document.getElementById('handle-modal');
+const handleInput   = document.getElementById('handle-input');
+const handleSubmit  = document.getElementById('handle-submit');
+const nameToggle    = document.getElementById('name-toggle');
+const presenceChip  = document.getElementById('presence-indicator');
+
+function updatePresenceChip() {
+  const connected = mpSocket && mpSocket.readyState === WebSocket.OPEN;
+  const n = remotes.size;
+  if (!connected) {
+    presenceChip.textContent = '[ offline ]';
+    presenceChip.classList.add('offline');
+    presenceChip.classList.remove('connected');
+    hidePlayersPanel();
+    return;
+  }
+  presenceChip.classList.remove('offline');
+  presenceChip.classList.add('connected');
+  presenceChip.textContent = n === 0 ? '[ solo ]' : `[ ${n} online ]`;
+  if (!playersPanel.classList.contains('hidden')) renderPlayersList();
+}
+
+// ── Players panel + teleport ───────────────────────────────────────────────
+const playersPanel = document.getElementById('players-panel');
+const playersList  = document.getElementById('players-list');
+
+function renderPlayersList() {
+  playersList.innerHTML = '';
+  if (remotes.size === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'players-empty';
+    empty.textContent = '[ no one else here ]';
+    playersList.appendChild(empty);
+    return;
+  }
+  for (const [id, r] of remotes.entries()) {
+    const btn = document.createElement('button');
+    btn.className = 'player-row';
+    btn.textContent = `[ ${r.handle.toUpperCase()} ]`;
+    btn.addEventListener('click', () => {
+      teleportTo(id);
+      hidePlayersPanel();
+    });
+    playersList.appendChild(btn);
+  }
+}
+
+function showPlayersPanel() {
+  renderPlayersList();
+  playersPanel.classList.remove('hidden');
+}
+function hidePlayersPanel() { playersPanel.classList.add('hidden'); }
+function togglePlayersPanel() {
+  if (playersPanel.classList.contains('hidden')) showPlayersPanel();
+  else hidePlayersPanel();
+}
+
+presenceChip.addEventListener('click', () => {
+  if (!mpSocket || mpSocket.readyState !== WebSocket.OPEN) return;
+  togglePlayersPanel();
+});
+
+function teleportTo(id) {
+  const r = remotes.get(id);
+  if (!r) return;
+  // Cancel any running camera animations.
+  gimbalAnim = null;
+  flyAnim = null;
+  autoRotateActive = false;
+  velocity.set(0, 0, 0);
+
+  // Land a short distance behind the target's facing direction so we see them
+  // from over their shoulder rather than face-planting into the sphere.
+  const targetPos = r.group.position.clone();
+  // Remote's forward = -Z in its local frame, rotated by its yaw.
+  const yaw = r.lastPose?.r?.[1] ?? 0;
+  const behind = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+  const dist = Math.max(MP_AVATAR_R * avatarScale * 6, 3.0);
+  const dest = targetPos.clone().addScaledVector(behind, dist);
+  camera.position.copy(dest);
+  camera.lookAt(targetPos);
+  // Camera rotation.order is 'YXZ', lookAt sets rotation correctly.
+  searchStatus.textContent = `teleported · ${r.handle}`;
+}
+
+function updateNameChip() {
+  nameToggle.textContent = `[ ${(mpHandle || 'name').toLowerCase()} ]`;
+}
+
+function openHandleModal() {
+  handleInput.value = mpHandle || '';
+  handleModal.classList.remove('hidden');
+  setTimeout(() => handleInput.focus(), 0);
+}
+
+function closeHandleModal() {
+  handleModal.classList.add('hidden');
+}
+
+function commitHandle() {
+  const v = handleInput.value.trim().slice(0, 16);
+  if (!v) return;
+  mpHandle = v;
+  localStorage.setItem('handle', mpHandle);
+  updateNameChip();
+  closeHandleModal();
+  mpConnect(); // (re)connect + rejoin with new handle
+}
+
+handleSubmit.addEventListener('click', commitHandle);
+handleInput.addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (e.code === 'Enter') { e.preventDefault(); commitHandle(); }
+});
+nameToggle.addEventListener('click', openHandleModal);
+
+updateNameChip();
+if (!mpHandle) openHandleModal();
+
+// ── Avatar geometry ────────────────────────────────────────────────────────
+function makeLabelTexture(handle) {
+  const text  = `[ ${handle.toUpperCase()} ]`;
+  const pad   = 16;
+  const canvas = document.createElement('canvas');
+  const ctx    = canvas.getContext('2d');
+  ctx.font = 'bold 48px "JetBrains Mono", monospace';
+  const tw = Math.ceil(ctx.measureText(text).width);
+  canvas.width  = tw + pad * 2;
+  canvas.height = 64 + pad * 2;
+  const c = canvas.getContext('2d');
+  c.font = 'bold 48px "JetBrains Mono", monospace';
+  c.textBaseline = 'middle';
+  c.fillStyle = darkMode ? '#cdd6f4' : '#000';
+  c.fillText(text, pad, canvas.height / 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.anisotropy = 2;
+  return { tex, w: canvas.width, h: canvas.height };
+}
+
+function createAvatar(handle) {
+  const group = new THREE.Group();
+  group.userData.isAvatar = true;
+
+  const sphereGeo = new THREE.SphereGeometry(MP_AVATAR_R, 18, 18);
+  const sphereMat = new THREE.MeshBasicMaterial({
+    color: darkMode ? 0xffffff : 0x000000, transparent: true,
+  });
+  const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+  group.add(sphere);
+
+  // Halo — soft radial sprite, additive blend so it glows against dark bg.
+  const haloMat = new THREE.SpriteMaterial({
+    map: ensureHaloTex(),
+    color: darkMode ? 0xffffff : 0x000000,
+    transparent: true,
+    depthWrite: false,
+    blending: darkMode ? THREE.AdditiveBlending : THREE.NormalBlending,
+    opacity: 0.85,
+    fog: false,
+  });
+  const halo = new THREE.Sprite(haloMat);
+  const haloS = MP_AVATAR_R * MP_HALO_MULT;
+  halo.scale.set(haloS, haloS, 1);
+  group.add(halo);
+
+  // Vertical beacon — long thin line through the avatar so it's easy to spot
+  // from far away, even when the sphere is sub-pixel.
+  const beaconGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, -MP_BEACON_HALF, 0),
+    new THREE.Vector3(0,  MP_BEACON_HALF, 0),
+  ]);
+  const beaconMat = new THREE.LineBasicMaterial({
+    color: darkMode ? 0xffffff : 0x000000,
+    transparent: true,
+    opacity: 0.25,
+    depthWrite: false,
+  });
+  const beacon = new THREE.Line(beaconGeo, beaconMat);
+  group.add(beacon);
+
+  const lineGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, 0, -MP_FWD_LEN),
+  ]);
+  const lineMat = new THREE.LineBasicMaterial({
+    color: darkMode ? 0xffffff : 0x000000, transparent: true,
+  });
+  const fwdLine = new THREE.Line(lineGeo, lineMat);
+  group.add(fwdLine);
+
+  const { tex, w, h } = makeLabelTexture(handle);
+  const labelMat = new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthWrite: false, depthTest: false,
+  });
+  const label = new THREE.Sprite(labelMat);
+  label.renderOrder = 999;
+  label.scale.set(MP_LABEL_W, MP_LABEL_W * (h / w), 1);
+  label.position.set(0, MP_LABEL_H, 0);
+  group.add(label);
+
+  group.scale.setScalar(avatarScale);
+  scene.add(group);
+
+  const miniDot = new THREE.Mesh(
+    new THREE.SphereGeometry(0.022, 10, 10),
+    new THREE.MeshBasicMaterial({ color: 0xffffff }),
+  );
+  globalGroup.add(miniDot);
+
+  return { group, sphere, halo, haloMat, beacon, beaconMat, fwdLine, label, labelMat, miniDot };
+}
+
+function disposeAvatar(r) {
+  scene.remove(r.group);
+  r.sphere.geometry.dispose();
+  r.sphere.material.dispose();
+  r.halo.geometry?.dispose?.();
+  r.haloMat.dispose();
+  r.beacon.geometry.dispose();
+  r.beaconMat.dispose();
+  r.fwdLine.geometry.dispose();
+  r.fwdLine.material.dispose();
+  if (r.labelMat.map) r.labelMat.map.dispose();
+  r.labelMat.dispose();
+  globalGroup.remove(r.miniDot);
+  r.miniDot.geometry.dispose();
+  r.miniDot.material.dispose();
+}
+
+function updateAvatarLabel(r, handle) {
+  if (r.labelMat.map) r.labelMat.map.dispose();
+  const { tex, w, h } = makeLabelTexture(handle);
+  r.labelMat.map = tex;
+  r.labelMat.needsUpdate = true;
+  r.label.scale.set(MP_LABEL_W, MP_LABEL_W * (h / w), 1);
+}
+
+// ── Pose application + interpolation ───────────────────────────────────────
+function ingestPose(id, pose) {
+  const r = remotes.get(id);
+  if (!r) return;
+  r.prevPose = r.lastPose || pose;
+  r.lastPose = pose;
+  r.lastPoseT = performance.now();
+  if (!r.initialized) {
+    // Snap on first pose so avatar doesn't sweep in from origin.
+    r.group.position.set(pose.p[0], pose.p[1], pose.p[2]);
+    r.group.rotation.order = 'YXZ';
+    r.group.rotation.set(pose.r[0], pose.r[1], 0);
+    r.initialized = true;
+  }
+}
+
+function addRemote(id, handle, pose) {
+  if (remotes.has(id)) return;
+  const av = createAvatar(handle || 'anon');
+  remotes.set(id, { handle: handle || 'anon', ...av });
+  if (pose && pose.p && pose.r) ingestPose(id, pose);
+  updatePresenceChip();
+}
+
+function removeRemote(id) {
+  const r = remotes.get(id);
+  if (!r) return;
+  disposeAvatar(r);
+  remotes.delete(id);
+  updatePresenceChip();
+}
+
+function updateRemotes(dt) {
+  const now = performance.now();
+  for (const r of remotes.values()) {
+    if (r.searchAnim) stepSearchAnim(r, now);
+    else if (r.lastPose) {
+      // One-frame-buffered lerp (alpha = elapsed / interval).
+      const alpha = Math.min(1, (now - r.lastPoseT) / MP_POSE_INTERVAL);
+      const { p, r: rot } = r.lastPose;
+      r.group.position.lerp(new THREE.Vector3(p[0], p[1], p[2]), alpha);
+      // Shortest-path angle lerp on yaw; pitch clamped.
+      r.group.rotation.order = 'YXZ';
+      r.group.rotation.y = lerpAngle(r.group.rotation.y, rot[1], alpha);
+      r.group.rotation.x = r.group.rotation.x + (rot[0] - r.group.rotation.x) * alpha;
+    }
+    // Fog fade — mirror point cloud's smoothstep over the same near/far.
+    const dist = camera.position.distanceTo(r.group.position);
+    const md = baseMaxDist * worldScale;
+    const near = md * 0.4, far = md * 2.5;
+    const t = Math.max(0, Math.min(1, (dist - near) / Math.max(1e-6, far - near)));
+    // Keep remotes readable even in heavy fog — floor ~0.4.
+    const opacity = Math.max(0.4, 1 - fogStrength * t);
+    r.sphere.material.opacity = opacity;
+    r.fwdLine.material.opacity = opacity;
+    r.haloMat.opacity    = 0.85 * opacity;
+    r.beaconMat.opacity  = 0.30 * opacity;
+    r.labelMat.opacity   = Math.max(opacity, 0.9);
+    // Minimap dot follows the avatar's world position.
+    r.miniDot.position.copy(localToGlobal(r.group.position));
+  }
+}
+
+function lerpAngle(a, b, t) {
+  let d = b - a;
+  while (d >  Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
+// ── Search replay on remote avatars ────────────────────────────────────────
+function startRemoteSearchAnim(r, target, offset, startT) {
+  const fromPos = r.group.position.clone();
+  const dir = new THREE.Vector3().subVectors(fromPos, target).normalize();
+  if (!isFinite(dir.x) || dir.lengthSq() < 1e-6) dir.set(0, 0, 1);
+  const toPos = new THREE.Vector3().copy(target).add(dir.multiplyScalar(Math.max(offset, 0.001)));
+
+  // Compute target yaw/pitch (face the centroid).
+  const tmp = new THREE.Object3D();
+  tmp.rotation.order = 'YXZ';
+  tmp.position.copy(fromPos);
+  tmp.lookAt(target);
+  const startYaw = r.group.rotation.y, startPitch = r.group.rotation.x;
+  let targetYaw = tmp.rotation.y;
+  while (targetYaw - startYaw >  Math.PI) targetYaw -= Math.PI * 2;
+  while (targetYaw - startYaw < -Math.PI) targetYaw += Math.PI * 2;
+  const targetPitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, tmp.rotation.x));
+
+  r.searchAnim = {
+    fromPos, toPos,
+    startYaw, startPitch, targetYaw, targetPitch,
+    startT: startT || Date.now(),
+    gimbalMs: PHASE.GIMBAL_MS,
+    // illuminate phase: avatar holds position/rotation (no replication of glow)
+    illumMs:  PHASE.ILLUMINATE_MS,
+    travelMs: PHASE.TRAVEL_MS,
+  };
+}
+
+function stepSearchAnim(r, now) {
+  const a = r.searchAnim;
+  // startT is epoch ms from the remote; convert to a local clock delta via
+  // Date.now() on this machine. Assumes loose clock alignment (hackathon scale).
+  const elapsed = Date.now() - a.startT;
+  const gEnd = a.gimbalMs;
+  const iEnd = gEnd + a.illumMs;
+  const tEnd = iEnd + a.travelMs;
+
+  if (elapsed < gEnd) {
+    const t = elapsed / a.gimbalMs;
+    const e = easeInOut(t);
+    r.group.rotation.order = 'YXZ';
+    r.group.rotation.y = a.startYaw   + (a.targetYaw   - a.startYaw)   * e;
+    r.group.rotation.x = a.startPitch + (a.targetPitch - a.startPitch) * e;
+  } else if (elapsed < iEnd) {
+    r.group.rotation.y = a.targetYaw;
+    r.group.rotation.x = a.targetPitch;
+  } else if (elapsed < tEnd) {
+    const t = (elapsed - iEnd) / a.travelMs;
+    r.group.position.lerpVectors(a.fromPos, a.toPos, easeInOut(t));
+  } else {
+    r.group.position.copy(a.toPos);
+    r.searchAnim = null;
+    // Seed lastPose so the normal interp path doesn't rubber-band backwards.
+    r.lastPose = { p: [a.toPos.x, a.toPos.y, a.toPos.z], r: [a.targetPitch, a.targetYaw] };
+    r.prevPose = r.lastPose;
+    r.lastPoseT = performance.now();
+  }
+}
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+function mpSend(msg) {
+  if (!mpSocket || mpSocket.readyState !== WebSocket.OPEN) return;
+  mpSocket.send(JSON.stringify(msg));
+  mpLastTrafficT = performance.now();
+}
+
+function sendPose() {
+  if (!mpSocket || mpSocket.readyState !== WebSocket.OPEN) return;
+  const now = performance.now();
+  if (now - mpLastPoseSent < MP_POSE_INTERVAL) return;
+  const p = camera.position;
+  const rx = camera.rotation.x, ry = camera.rotation.y;
+  const moved =
+    Math.abs(p.x - mpLastPoseP.x) > 1e-4 ||
+    Math.abs(p.y - mpLastPoseP.y) > 1e-4 ||
+    Math.abs(p.z - mpLastPoseP.z) > 1e-4 ||
+    Math.abs(rx - mpLastPoseRx) > 1e-3 ||
+    Math.abs(ry - mpLastPoseRy) > 1e-3;
+  if (!moved) {
+    // Idle ping if we haven't talked in a while.
+    if (now - mpLastTrafficT > MP_PING_MS) mpSend({ type: 'ping' });
+    return;
+  }
+  mpLastPoseSent = now;
+  mpLastPoseP.copy(p);
+  mpLastPoseRx = rx; mpLastPoseRy = ry;
+  mpSend({ type: 'pose', p: [p.x, p.y, p.z], r: [rx, ry], t: Date.now() });
+}
+
+function sendSearch(target, offset) {
+  mpSend({
+    type: 'search',
+    target: [target.x, target.y, target.z],
+    offset,
+    startT: Date.now(),
+  });
+}
+
+function mpConnect() {
+  if (!mpHandle) return;
+  if (mpSocket && (mpSocket.readyState === WebSocket.OPEN || mpSocket.readyState === WebSocket.CONNECTING)) {
+    // Already connected: just resend join to update handle.
+    const p = camera.position;
+    mpSend({
+      type: 'join',
+      handle: mpHandle,
+      pose: { p: [p.x, p.y, p.z], r: [camera.rotation.x, camera.rotation.y] },
+    });
+    return;
+  }
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = `${proto}://${location.host}/ws`;
+  const ws = new WebSocket(url);
+  mpSocket = ws;
+
+  ws.addEventListener('open', () => {
+    const p = camera.position;
+    mpSend({
+      type: 'join',
+      handle: mpHandle,
+      pose: { p: [p.x, p.y, p.z], r: [camera.rotation.x, camera.rotation.y] },
+    });
+    console.log('[mp] ws open', url);
+    updatePresenceChip();
+  });
+
+  ws.addEventListener('message', (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    switch (msg.type) {
+      case 'hello':
+        mpUserId = msg.id;
+        for (const u of msg.users || []) addRemote(u.id, u.handle, u.pose);
+        break;
+      case 'join':
+        if (remotes.has(msg.id)) {
+          const r = remotes.get(msg.id);
+          r.handle = msg.handle;
+          updateAvatarLabel(r, msg.handle);
+          if (msg.pose) ingestPose(msg.id, msg.pose);
+        } else {
+          addRemote(msg.id, msg.handle, msg.pose);
+        }
+        break;
+      case 'pose':
+        if (!remotes.has(msg.id)) addRemote(msg.id, 'anon', { p: msg.p, r: msg.r });
+        else ingestPose(msg.id, { p: msg.p, r: msg.r });
+        break;
+      case 'search':
+        if (!remotes.has(msg.id)) break;
+        startRemoteSearchAnim(
+          remotes.get(msg.id),
+          new THREE.Vector3(msg.target[0], msg.target[1], msg.target[2]),
+          msg.offset || 0,
+          msg.startT,
+        );
+        break;
+      case 'leave':
+        removeRemote(msg.id);
+        break;
+    }
+  });
+
+  ws.addEventListener('close', (ev) => {
+    console.log('[mp] ws close', ev.code, ev.reason);
+    mpSocket = null;
+    mpUserId = null;
+    for (const id of Array.from(remotes.keys())) removeRemote(id);
+    updatePresenceChip();
+    setTimeout(mpConnect, 1000);
+  });
+
+  ws.addEventListener('error', (ev) => {
+    console.warn('[mp] ws error', ev);
+    try { ws.close(); } catch {}
+  });
+}
+
+// Expose for DevTools debugging.
+window.__mp = { get socket() { return mpSocket; }, remotes, sendPing: () => mpSend({ type: 'ping' }) };
+
+if (mpHandle) mpConnect();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Animation loop
@@ -1166,6 +1731,7 @@ function animate(now) {
   lastTime = now;
 
   updateMovement(dt);
+  sendPose();
   updateAutoRotate(dt);
   updateGimbal(now);
   updateIlluminate(now);
@@ -1173,6 +1739,7 @@ function animate(now) {
   updateExpand(now);
   updateDestCloud();
   updateCrosshair();
+  updateRemotes(dt);
   updateGlobalScene();
 
   renderer.render(scene, camera);
