@@ -1,6 +1,8 @@
+import asyncio
 import mimetypes
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
@@ -12,11 +14,27 @@ from sqlalchemy.orm import Session
 from pipeline.run import run_pipeline
 from shared.database import Sample, get_session
 
+from . import realtime
 from .search import search_samples
 from .umap_service import get_status as umap_status
 from .umap_service import trigger_recompute
 
-app = FastAPI(title="riemanns-roman-manifold")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    reaper = asyncio.create_task(realtime.heartbeat_reaper())
+    try:
+        yield
+    finally:
+        reaper.cancel()
+        try:
+            await reaper
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+app = FastAPI(title="riemanns-roman-manifold", lifespan=lifespan)
+app.include_router(realtime.router)
 
 UI_DIR = Path(__file__).resolve().parents[1] / "ui"
 
@@ -52,9 +70,13 @@ def visualization_status(db: Session = Depends(get_session)):
 
 
 @app.post("/visualization/recompute")
-def visualization_recompute():
-    result = trigger_recompute()
-    return {"job_id": result["job_id"], "started": result["started"]}
+def visualization_recompute(force: bool = False):
+    result = trigger_recompute(force=force)
+    return {
+        "job_id": result["job_id"],
+        "started": result["started"],
+        "cached": result.get("cached", False),
+    }
 
 
 @app.get("/visualization/layout")

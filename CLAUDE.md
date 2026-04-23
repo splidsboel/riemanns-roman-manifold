@@ -55,20 +55,36 @@ The semantic-search pane lives in `ui/` — vanilla Three.js, no build step, ser
 
 After arrival: destination marker + line removed, illumination cleared, status reads `arrived · N results`.
 
+### Multiplayer presence (branch `jse/multiplayer`)
+Every tab opens a WebSocket to `/ws` on boot and joins a single shared room.
+
+- **Handle**: prompted on first load, persisted in `localStorage`. Editable via the `[ name ]` chip in the top-right row.
+- **Presence chip** (top-right): `[ offline ] / [ solo ] / [ N online ]`. Click to open a dropdown of connected handles — clicking a handle **teleports** the camera to just behind that player, looking at them (`teleportTo()` in `ui/main.js`).
+- **Avatars**: sphere + additive halo sprite + billboarded `[ HANDLE ]` label + long vertical beacon line (±120 units) so distant players are visible. Forward line shows look direction. Controlled by the **PLAYER SIZE** slider in settings (`0.3`–`50×`, applied via `group.scale`). Avatars are excluded from the crosshair raycast.
+- **Sync**: pose broadcast at 20 Hz, movement-gated (skip when neither position nor rotation moved beyond epsilon); receiver lerps one frame buffered. Heartbeat ping every 5 s of idle.
+- **Search replay**: when a remote runs a search, their `search` message is rebroadcast and each client replays `PHASE.GIMBAL_MS` → `PHASE.TRAVEL_MS` locally on that remote's avatar. Illumination stays personal — not replicated.
+- **Minimap**: each remote gets a small white dot in the global-world cube (red stays reserved for self + destination).
+- **Fog fade** mirrors the point cloud's `uFogNear`/`uFogFar`, with a `0.4` opacity floor so remotes never vanish.
+
+Quick debug: `window.__mp` exposes `{ socket, remotes, sendPing() }` in DevTools. Console logs `[mp] ws open/close/error`.
+
 ### Standalone demo mode
 When `/visualization/status` is unreachable, the UI falls back to a generated 6-cluster × 250-point demo cloud. `doSearch()` also has a fake-search path (`pickDemoMatches`) that hashes the query and picks a deterministic cluster, so the gimbal/illuminate/travel animation can be exercised end-to-end without a backend. Serve the `ui/` folder over any static HTTP server (`python3 -m http.server`) and open the root.
 
 ### Planned three-pane shell
 The UI will eventually live inside a tiled three-pane layout (ProducerPal · Ableton · Semantic Search) that is locked together so panes don't need per-window resizing. The current DOM is flat and every element uses `position: fixed` — migration path is to wrap the pane in a single `#search-root` container and switch children to a relative grid. The Three.js renderers already accept target canvases, so only CSS needs to move.
 
-### Backend endpoints expected by the UI
-Not yet implemented on the API side — until they exist, demo fallback kicks in.
+### Backend endpoints used by the UI
+Implemented in `api/main.py` (+ `api/realtime.py` for WebSocket). The demo fallback still kicks in if `/visualization/status` is unreachable.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `GET`  | `/visualization/status` | Bootstrap polling |
-| `GET`  | `/visualization/layout` | Initial point cloud — `{points: [{path, filename, x, y, z, cluster}]}` |
+| `GET`  | `/visualization/layout` | Initial point cloud — `{points: [{id, path, filename, x, y, z, cluster}]}` |
+| `POST` | `/visualization/recompute` | Kick off a UMAP fit. Returns `{job_id, started, cached}`. Cached-idempotent unless `?force=true`. |
 | `POST` | `/search` | `{query, k}` → `{results: [{path, ...}]}` |
+| `GET`  | `/audio/{sample_id}` | Stream a sample file |
+| `WS`   | `/ws` | Multiplayer presence relay — see *Multiplayer presence* above |
 
 ### Search
 - **Text-to-audio**: Natural language queries ("warm pad", "punchy kick") via CLAP text embeddings → pgvector cosine similarity
@@ -87,7 +103,8 @@ Not yet implemented on the API side — until they exist, demo fallback kicks in
 - **Structural segmentation**: split stems/tracks into verse, chorus, bridge, etc. — boundaries snapped to nearest downbeat
 - **Metadata extraction**: BPM, key, roman numeral analysis (spec TBD)
 - **CLAP embedding**: compute audio embeddings → store in pgvector
-- **UMAP recomputation**: triggered via API endpoint when new samples are added
+- **UMAP recomputation**: triggered via API endpoint when new samples are added.
+  Results are cached in `api/umap_service.py` — `trigger_recompute()` fingerprints `(count_of_embedded, max(created_at))` and skips the fit when nothing changed since the last successful run. On cold start (server restart) it trusts the DB if all embedded samples already have coords. Pass `?force=true` to bypass.
 
 ### ProducerPal
 - AI assistant that knows Ableton Live's functionality and can control it
@@ -112,7 +129,7 @@ bash docker/start.sh
 
 | Container | Image | Port | Formål |
 |---|---|---|---|
-| `docker-pgvector-1` | `pgvector/pgvector:pg16` | `5432` | PostgreSQL + pgvector extension |
+| `docker-pgvector-1` | `pgvector/pgvector:pg16` | `5544` → `5432` | PostgreSQL + pgvector extension (host port 5544, container 5432) |
 | `docker-ollama-1` | `ollama/ollama:latest` | `11434` | Ollama LLM runtime |
 
 **Ollama-modeller hentet:**
@@ -121,6 +138,7 @@ bash docker/start.sh
 
 **pgvector:**
 - Database: `manifold`, user: `postgres`, password: `postgres`
+- Host port **5544** (avoids clashing with a system Postgres on 5432). The API reads `DATABASE_URL`; default in `shared/database/config.py` still points to 5432, so you must export e.g. `DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5544/manifold` when running uvicorn.
 - `vector`-extension er aktiveret og klar til brug
 - Bekræftet: forbindelse OK, CREATE TABLE/DROP TABLE virker
 

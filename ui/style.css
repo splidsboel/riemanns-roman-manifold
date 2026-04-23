@@ -167,7 +167,7 @@ canvas { display: block; }
 }
 
 /* ── Settings (top-right) ───────────────────────────────────────────── */
-#settings-toggle, #theme-toggle, #local-toggle {
+#settings-toggle, #theme-toggle, #local-toggle, #name-toggle, #presence-indicator {
   position: fixed;
   top: 16px;
   background: var(--panel-bg);
@@ -184,9 +184,83 @@ canvas { display: block; }
 #settings-toggle { right: 16px; }
 #theme-toggle    { right: 72px; }
 #local-toggle    { right: 152px; }
+#name-toggle        { right: 240px; }
+#presence-indicator { right: 340px; }
+#presence-indicator.connected { border-color: var(--fg); }
+#presence-indicator.offline   { opacity: 0.55; cursor: default; }
+
+#players-panel {
+  position: fixed;
+  top: 54px;
+  right: 340px;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#players-panel.hidden { display: none; }
+#players-list { display: flex; flex-direction: column; gap: 4px; }
+.player-row {
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+}
+.player-row:hover { background: var(--fg); color: var(--bg); }
+.players-empty {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  opacity: 0.55;
+  padding: 4px 2px;
+}
 #local-toggle.active { background: var(--fg); color: var(--bg); }
 
-#settings-toggle:hover, #theme-toggle:hover, #local-toggle:hover { background: var(--fg); color: var(--bg); }
+#settings-toggle:hover, #theme-toggle:hover, #local-toggle:hover, #name-toggle:hover { background: var(--fg); color: var(--bg); }
+
+#handle-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+#handle-modal.hidden { display: none; }
+#handle-panel {
+  position: static;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  min-width: 260px;
+}
+#handle-input {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  outline: none;
+}
+#handle-submit {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+#handle-submit:hover { background: var(--fg); color: var(--bg); }
 
 #settings-panel {
   top: 54px;

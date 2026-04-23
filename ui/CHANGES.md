@@ -160,3 +160,65 @@ is locked) to play that sample. A single `<audio>` element is reused, so
 starting a new preview stops the previous one. Audio is fetched from
 `/audio/{id}` on the same origin as the UI, which lets playback work
 through the Cloudflare tunnel without any host/IP plumbing on the client.
+
+---
+
+# UI changes — `jse/multiplayer` branch
+
+Shared-world multiplayer presence. Everything new is gated behind a
+WebSocket connection to `/ws` (served by `api/realtime.py`). Works
+through the Cloudflare tunnel unchanged.
+
+## Handle + presence HUD
+
+- **`#handle-modal`** — opens on first load when `localStorage` has no
+  `handle`. Saves to localStorage on submit. Re-open via the `[ name ]`
+  chip in the top-right button row.
+- **`#presence-indicator`** chip — `[ offline ] / [ solo ] / [ N online ]`.
+  Clicking it (when connected) toggles `#players-panel`, a dropdown
+  listing connected handles. Clicking a handle calls `teleportTo(id)`
+  which places the camera a short distance behind that avatar and
+  `lookAt`s it, cancelling any in-flight gimbal/travel animation.
+
+## Remote avatars
+
+Added in `createAvatar(handle)` and pushed into the existing `scene`:
+
+| Element | Purpose |
+|---|---|
+| `sphere` (MeshBasicMaterial) | body, radius `MP_AVATAR_R = 0.9` |
+| `halo` (Sprite, additive in dark mode) | soft glow, `5×` sphere radius |
+| `beacon` (Line, ±120 units on Y) | low-opacity locator visible from far away |
+| `fwdLine` (Line, length `3.0`) | shows look direction |
+| `label` (Sprite with canvas texture) | `[ HANDLE ]` in uppercase, `depthTest: false` so it reads through points |
+| `miniDot` | small white sphere in `globalGroup` (the minimap cube) |
+
+`avatarScale` multiplier is applied to the avatar `group.scale` so the
+new **PLAYER SIZE** slider (0.3–50×) scales every piece at once.
+Remotes are excluded from the crosshair raycast because the existing
+picker only queries `pointCloud`.
+
+## Pose + search sync
+
+- `sendPose()` is called inside `animate()` right after
+  `updateMovement(dt)`. Throttled to `MP_POSE_HZ = 20` and skipped when
+  neither position nor rotation moved past `1e-4` / `1e-3`. Idle ping
+  every `MP_PING_MS = 5000` ms.
+- `updateRemotes(dt)` does a one-frame-buffered lerp toward the latest
+  pose, shortest-path yaw, and applies fog fade mirroring the point
+  cloud's `uFogNear`/`uFogFar` (opacity floor `0.4`).
+- `doSearch()` calls `sendSearch(target, radius*0.3)` right before the
+  gimbal phase. On the receiver, `startRemoteSearchAnim` replays gimbal
+  → hold → travel over the same `PHASE.*_MS` durations on that remote's
+  avatar. Illumination is deliberately **not** replicated.
+
+## Theme
+
+`applyTheme()` now iterates remotes and updates sphere/halo/beacon
+colours + rebuilds the label canvas. Guarded with try/catch because the
+initial boot call happens while `remotes` is still in TDZ.
+
+## Debug
+
+`window.__mp = { socket, remotes, sendPing() }` is exposed for DevTools.
+Console logs `[mp] ws open/close/error` on lifecycle events.
