@@ -1,7 +1,7 @@
 [project]
 name = "ragrats-rimanns"
 version = "0.1.0"
-description = "RagRats chunks explored through 3D vector space visualization"
+description = "ragrats chunks explored through 3D vector space visualization"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi==0.104.1",

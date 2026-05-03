@@ -1,83 +1,64 @@
 # riemanns-roman-manifold
 
-Music producers explore their sample libraries through 3D vector space visualization and semantic search. Samples are embedded using CLAP models, reduced to 3D via UMAP, and rendered as an interactive scene in Three.js.
+3D vector space visualization of ragrats chunks. Reads 2556-dimensional embeddings from the ragrats PostgreSQL database, reduces to 3D via UMAP, and renders as an interactive Three.js point cloud.
 
 ## Repo structure
 
 ```
-api/            # Python FastAPI service (uvicorn) — REST endpoints, serves frontend static files
-ui/             # Vanilla Three.js frontend — interactive 3D visualization, Web Audio playback
-pipeline/       # Audio processing — embedding (CLAP), metadata extraction, UMAP computation
-shared/         # Shared Python utilities (DB models, config, types)
-docker/         # Docker Compose config (pgvector, etc.)
-data/           # Local sample data directory (not committed)
+api/            # FastAPI backend — REST endpoints, serves static UI
+ui/             # Vanilla Three.js frontend — interactive 3D visualization
+pipeline/       # UMAP dimensionality reduction (2556D → 3D)
+shared/         # Database config, models, utilities
 ```
-
-Flat monorepo. Single Python project with `uv` for dependency management.
 
 ## Architecture
 
 ### Backend (Python)
 - **Framework**: FastAPI + uvicorn
-- **Database**: PostgreSQL + pgvector (Docker Compose)
-- **Embedding model**: LAION CLAP (starting point — may experiment with other models)
-- **Dimensionality reduction**: UMAP → 3D coordinates, pre-computed and stored in DB
-- **API style**: REST (WebSocket planned for future Ableton integration)
+- **Database**: PostgreSQL on localhost:5433 (ragrats instance)
+- **Dimensionality reduction**: UMAP → 3D coordinates, computed on startup
+- **API style**: REST (GET /api/chunks, GET /api/chunk/{id})
 
 ### Frontend
-- **Rendering**: Vanilla Three.js (no framework)
-- **Visualization**: Interactive 3D nodes — clickable, hoverable, showing sample metadata
-- **Audio**: Web Audio API for in-browser sample playback
-- **Serving**: Static files served by the Python API (single origin, no CORS)
-- **Navigation mode**: TBD — will be specified when visualization work begins
+- **Rendering**: Vanilla Three.js
+- **Interaction**: Drag to rotate, scroll to zoom, click to inspect
+- **Display**: Point cloud with vessel-based color coding; chunk text in bottom panel
 
-### Search
-- **Text-to-audio**: Natural language queries ("warm pad", "punchy kick") via CLAP text embeddings → pgvector cosine similarity
-- **Audio-to-audio**: Select/upload a sample → find similar via CLAP audio embeddings → pgvector cosine similarity
+## Setup
 
-### Pipeline
-- Triggered via API endpoint (not CLI)
-- Processes audio files from a configured directory on the host machine
-- Supported formats: WAV, MP3
-- Steps: load audio → extract metadata (spec TBD) → compute CLAP embedding → store in pgvector
-- UMAP coordinates are pre-computed after embedding, with an API endpoint to trigger recomputation when new samples are added
-
-## Deployment
-
-- **Backend host**: NVIDIA DGX Spark (Ubuntu) — runs API, pipeline, pgvector (Docker Compose)
-- **Demo**: MacBook (macOS) with mirror dataset — same Docker Compose setup
-- **Cross-platform**: Must work on both Ubuntu and macOS
-- **Frontend**: Served by the API, accessed via browser on any machine
-
-## Development
-
-### Setup
 ```bash
-# Install uv (if not installed)
+# Install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install Python dependencies
+# Install dependencies
 uv sync
 
-# Start pgvector
-docker compose -f docker/docker-compose.yml up -d
-
-# Run the API (serves frontend too)
+# Run the API
 uv run uvicorn api.main:app --reload
 ```
 
-### Testing
-Minimal tests for critical paths only (pipeline processing, search endpoints). No enforced linting or formatting.
+API runs on http://localhost:8000
 
-### Scale target
-Up to 100,000 samples per library.
+## Database
 
-## Future work (not yet specified)
-- Ableton Live integration via ProducerPal using local LLM (Gemma 4)
-- WebSocket support for real-time features
-- Detailed metadata extraction specification (BPM, key, spectral features, etc.)
-- Advanced 3D navigation modes
+Reads from ragrats database:
+- Host: localhost:5433
+- User: teamragrats
+- Password: ragrats
+- Database: ragrats
+- Table: chunks (with 2556D embedding vectors)
 
-## Reference
-- Inspiration repo: https://github.com/splidsboel/samplevec
-- This file will be continuously updated as individual features are specified
+## Data flow
+
+1. Startup: Load all chunks from `chunks` table
+2. Compute: UMAP reduction of 2556D embeddings to 3D
+3. Serve: API returns chunks with 3D coordinates
+4. Render: Three.js visualizes points in 3D space
+5. Interact: Click point → display text in panel
+
+## Development notes
+
+- No embedding model runs during visualization (uses pre-computed vectors)
+- UMAP parameters: n_components=3, n_neighbors=15, min_dist=0.1
+- Point colors hash vessel name for consistency
+- Auto-rotation pauses on drag

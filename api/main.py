@@ -9,7 +9,7 @@ from shared.db import get_session_factory, test_connection
 from shared.models import Chunk
 from pipeline.umap import load_all_chunks, compute_3d_coordinates
 
-app = FastAPI(title="RagRats Vector Visualization")
+app = FastAPI(title="ragrats Vector Visualization")
 
 # Store 3D coordinates in memory (computed on startup)
 coordinates_cache = {}
